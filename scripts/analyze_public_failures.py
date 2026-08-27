@@ -21,6 +21,7 @@ def route_ranks(
     target: str,
     limit: int,
     disjunctive_weight: float,
+    popularity_weight: float,
 ) -> dict[str, int | None]:
     quoted = [f'"{term}"' for term in terms]
     expressions = {
@@ -35,7 +36,12 @@ def route_ranks(
     for name, expression in expressions.items():
         ranking = agent._ranked_asins(expression, limit) if expression else []
         result[name] = ranking.index(target) + 1 if target in ranking else None
-    fused = agent._fused_search(terms, limit, disjunctive_weight=disjunctive_weight)
+    fused = agent._fused_search(
+        terms,
+        limit,
+        disjunctive_weight=disjunctive_weight,
+        popularity_weight=popularity_weight,
+    )
     result["fused"] = fused.index(target) + 1 if target in fused else None
     return result
 
@@ -86,6 +92,7 @@ def analyze(
                     target,
                     route_limit,
                     disjunctive_weight=1.0 if state["exploratory"] else 2.0,
+                    popularity_weight=0.0 if state["exploratory"] else 1.0,
                 )
                 rank_cache[rank_key] = ranks
             turns.append({
