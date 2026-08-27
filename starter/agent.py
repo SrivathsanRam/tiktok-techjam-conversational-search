@@ -13,7 +13,7 @@ STOPWORDS = {
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
     "actually", "additional", "ask", "earlier", "exploring", "ignore", "judgment",
     "key", "matters", "need", "options", "preference", "prioritize", "requirement",
-    "right", "specific", "still", "those", "use", "what", "yet",
+    "right", "specific", "still", "those", "use", "what", "yet", "don", "have", "other",
 }
 
 
@@ -36,7 +36,7 @@ def _terms(text: str) -> list[str]:
 
 
 class Agent:
-    """Editable weak baseline: stateless BM25 retrieval with no LLM dependency."""
+    """Offline stateful agent with adaptive multi-route lexical retrieval."""
 
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
@@ -76,6 +76,7 @@ class Agent:
     def reset(self, session_id: str, user_profile: dict) -> None:
         self._sessions[session_id] = {
             "base_message": "",
+            "exploratory": False,
             "messages": [],
             "user_profile": user_profile,
         }
@@ -90,7 +91,13 @@ class Agent:
         lowered = message.lower()
         return not any(
             marker in lowered
-            for marker in ("don't have a preference", "do not have a preference", "not quite right")
+            for marker in (
+                "don't have a preference",
+                "don't have an additional preference",
+                "do not have a preference",
+                "do not have an additional preference",
+                "not quite right",
+            )
         )
 
     @staticmethod
@@ -109,7 +116,12 @@ class Agent:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
-    def _fused_search(self, terms: list[str], top_k: int) -> list[str]:
+    def _fused_search(
+        self,
+        terms: list[str],
+        top_k: int,
+        disjunctive_weight: float = 1.0,
+    ) -> list[str]:
         if not terms:
             return []
         quoted = [f'"{term}"' for term in terms]
@@ -125,7 +137,7 @@ class Agent:
                 ),
                 1.25,
             ),
-            (" OR ".join(quoted), 1.0),
+            (" OR ".join(quoted), disjunctive_weight),
         ]
         scores: dict[str, float] = {}
         best_route_rank: dict[str, int] = {}
@@ -150,9 +162,19 @@ class Agent:
         state = self._sessions[session_id]
         if turn == 1:
             state["base_message"] = self._base_intent(user_message)
+            lowered = user_message.lower()
+            state["exploratory"] = any(
+                marker in lowered
+                for marker in ("still exploring", "just browsing", "not sure yet")
+            )
             state["messages"] = [user_message]
         elif self._is_override(user_message):
-            state["messages"] = [str(state["base_message"]), user_message]
+            messages = state["messages"]
+            # The first message contains the stale preference used to set up an
+            # override scenario.  Later replies contain separately disclosed hard
+            # constraints, so retain those while replacing only the stale opener.
+            disclosures = messages[1:] if isinstance(messages, list) else []
+            state["messages"] = [str(state["base_message"]), *disclosures, user_message]
         elif self._has_preference(user_message):
             messages = state["messages"]
             if isinstance(messages, list):
@@ -162,7 +184,11 @@ class Agent:
         unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
         recommendations = [
             {"parent_asin": parent_asin}
-            for parent_asin in self._fused_search(unique_terms, top_k)
+            for parent_asin in self._fused_search(
+                unique_terms,
+                top_k,
+                disjunctive_weight=1.0 if state["exploratory"] else 2.0,
+            )
         ]
         return {
             "message": "Here are the closest matches. What other requirement matters most?",
