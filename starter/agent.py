@@ -11,6 +11,9 @@ STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
     "i", "in", "is", "it", "me", "my", "of", "on", "or", "please", "some",
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
+    "actually", "additional", "ask", "earlier", "exploring", "ignore", "judgment",
+    "key", "matters", "need", "options", "preference", "prioritize", "requirement",
+    "right", "specific", "still", "those", "use", "what", "yet",
 }
 
 
@@ -38,7 +41,7 @@ class Agent:
     def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
-        self._sessions: set[str] = set()
+        self._sessions: dict[str, dict[str, object]] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -71,8 +74,30 @@ class Agent:
         self.connection.commit()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
-        # The profile is anonymized and may be used for personalization.
-        self._sessions.add(session_id)
+        self._sessions[session_id] = {
+            "base_message": "",
+            "messages": [],
+            "user_profile": user_profile,
+        }
+
+    @staticmethod
+    def _is_override(message: str) -> bool:
+        lowered = message.lower()
+        return any(marker in lowered for marker in ("actually", "instead of", "forget ", "ignore my earlier"))
+
+    @staticmethod
+    def _has_preference(message: str) -> bool:
+        lowered = message.lower()
+        return not any(
+            marker in lowered
+            for marker in ("don't have a preference", "do not have a preference", "not quite right")
+        )
+
+    @staticmethod
+    def _base_intent(message: str) -> str:
+        # The initial category precedes the first sentence boundary.  Keeping only
+        # that clause prevents an Intent Override from retaining the stale value.
+        return message.split(".", 1)[0]
 
     def respond(
         self,
@@ -83,7 +108,19 @@ class Agent:
     ) -> dict:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
-        unique_terms = list(dict.fromkeys(_terms(user_message)))[:40]
+        state = self._sessions[session_id]
+        if turn == 1:
+            state["base_message"] = self._base_intent(user_message)
+            state["messages"] = [user_message]
+        elif self._is_override(user_message):
+            state["messages"] = [str(state["base_message"]), user_message]
+        elif self._has_preference(user_message):
+            messages = state["messages"]
+            if isinstance(messages, list):
+                messages.append(user_message)
+
+        query_text = " ".join(str(item) for item in state["messages"])
+        unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
         expression = " OR ".join(f'"{term}"' for term in unique_terms)
         if not expression:
             recommendations: list[dict] = []
@@ -95,8 +132,8 @@ class Agent:
             ).fetchall()
             recommendations = [{"parent_asin": str(row[0])} for row in rows]
         return {
-            "message": "Here are the closest matches I found.",
-            "ask_attribute": None,
+            "message": "Here are the closest matches. What other requirement matters most?",
+            "ask_attribute": "other",
             "recommendations": recommendations,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
         }
