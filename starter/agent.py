@@ -99,6 +99,45 @@ class Agent:
         # that clause prevents an Intent Override from retaining the stale value.
         return message.split(".", 1)[0]
 
+    def _ranked_asins(self, expression: str, limit: int = 150) -> list[str]:
+        if not expression:
+            return []
+        rows = self.connection.execute(
+            "SELECT parent_asin FROM products WHERE products MATCH ? "
+            "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
+            (expression, limit),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def _fused_search(self, terms: list[str], top_k: int) -> list[str]:
+        if not terms:
+            return []
+        quoted = [f'"{term}"' for term in terms]
+        # All disclosed constraints originate in catalog text.  The conjunctive
+        # route therefore supplies precision, while phrase and disjunctive routes
+        # retain recall when free-form wording is less exact.
+        expressions = [
+            (" AND ".join(quoted), 2.5),
+            (
+                " OR ".join(
+                    f'"{terms[index]} {terms[index + 1]}"'
+                    for index in range(len(terms) - 1)
+                ),
+                1.25,
+            ),
+            (" OR ".join(quoted), 1.0),
+        ]
+        scores: dict[str, float] = {}
+        best_route_rank: dict[str, int] = {}
+        for expression, weight in expressions:
+            if not expression:
+                continue
+            for rank, parent_asin in enumerate(self._ranked_asins(expression), start=1):
+                scores[parent_asin] = scores.get(parent_asin, 0.0) + weight / (20.0 + rank)
+                best_route_rank[parent_asin] = min(best_route_rank.get(parent_asin, rank), rank)
+        ordered = sorted(scores, key=lambda asin: (-scores[asin], best_route_rank[asin], asin))
+        return ordered[:top_k]
+
     def respond(
         self,
         session_id: str,
@@ -121,16 +160,10 @@ class Agent:
 
         query_text = " ".join(str(item) for item in state["messages"])
         unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
-        expression = " OR ".join(f'"{term}"' for term in unique_terms)
-        if not expression:
-            recommendations: list[dict] = []
-        else:
-            rows = self.connection.execute(
-                "SELECT parent_asin FROM products WHERE products MATCH ? "
-                "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-                (expression, top_k),
-            ).fetchall()
-            recommendations = [{"parent_asin": str(row[0])} for row in rows]
+        recommendations = [
+            {"parent_asin": parent_asin}
+            for parent_asin in self._fused_search(unique_terms, top_k)
+        ]
         return {
             "message": "Here are the closest matches. What other requirement matters most?",
             "ask_attribute": "other",
