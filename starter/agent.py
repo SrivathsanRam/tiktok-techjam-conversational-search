@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from pathlib import Path
@@ -42,6 +43,7 @@ class Agent:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, dict[str, object]] = {}
+        self._popularity: dict[str, float] = {}
         self._build_index()
 
     def _build_index(self) -> None:
@@ -55,9 +57,15 @@ class Agent:
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
+                parent_asin = str(product["parent_asin"])
+                try:
+                    rating_number = max(0.0, float(product.get("rating_number") or 0.0))
+                except (TypeError, ValueError):
+                    rating_number = 0.0
+                self._popularity[parent_asin] = math.log1p(rating_number)
                 batch.append(
                     (
-                        str(product["parent_asin"]),
+                        parent_asin,
                         _text(product.get("title")),
                         _text(product.get("categories")),
                         _text(product.get("features")),
@@ -121,6 +129,7 @@ class Agent:
         terms: list[str],
         top_k: int,
         disjunctive_weight: float = 1.0,
+        popularity_weight: float = 0.0,
     ) -> list[str]:
         if not terms:
             return []
@@ -147,6 +156,13 @@ class Agent:
             for rank, parent_asin in enumerate(self._ranked_asins(expression), start=1):
                 scores[parent_asin] = scores.get(parent_asin, 0.0) + weight / (20.0 + rank)
                 best_route_rank[parent_asin] = min(best_route_rank.get(parent_asin, rank), rank)
+        if popularity_weight > 0.0:
+            popularity_ranking = sorted(
+                scores,
+                key=lambda asin: (-self._popularity.get(asin, 0.0), asin),
+            )
+            for rank, parent_asin in enumerate(popularity_ranking, start=1):
+                scores[parent_asin] += popularity_weight / (20.0 + rank)
         ordered = sorted(scores, key=lambda asin: (-scores[asin], best_route_rank[asin], asin))
         return ordered[:top_k]
 
@@ -188,6 +204,7 @@ class Agent:
                 unique_terms,
                 top_k,
                 disjunctive_weight=1.0 if state["exploratory"] else 2.0,
+                popularity_weight=0.0 if state["exploratory"] else 1.0,
             )
         ]
         return {
