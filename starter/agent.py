@@ -9,6 +9,22 @@ from pathlib import Path
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 RERANK_CANDIDATES = 60
+RERANK_FEATURE_NAMES = (
+    "retrieval",
+    "coverage",
+    "title_coverage",
+    "category_coverage",
+    "attribute_coverage",
+    "description_coverage",
+    "constraint_coverage",
+    "exact_fraction",
+    "material_match",
+    "color_match",
+    "budget_match",
+    "popularity",
+    "exploratory_popularity",
+    "specific_constraint",
+)
 MATERIAL_TERMS = {
     "cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric",
 }
@@ -47,13 +63,30 @@ def _terms(text: str) -> list[str]:
 class Agent:
     """Offline stateful agent with adaptive multi-route lexical retrieval."""
 
-    def __init__(self, catalog_path: str | Path = "data/catalog.jsonl") -> None:
+    def __init__(
+        self,
+        catalog_path: str | Path = "data/catalog.jsonl",
+        load_reranker: bool = True,
+    ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, dict[str, object]] = {}
         self._popularity: dict[str, float] = {}
         self._product_views: dict[str, tuple[str, str, str, str, str, str, float | None]] = {}
         self._build_index()
+        self._max_popularity = max(self._popularity.values(), default=1.0)
+        self._reranker_weights = self._load_reranker_weights() if load_reranker else None
+
+    @staticmethod
+    def _load_reranker_weights() -> tuple[float, ...] | None:
+        weights_path = Path(__file__).with_name("reranker_weights.json")
+        if not weights_path.exists():
+            return None
+        payload = json.loads(weights_path.read_text(encoding="utf-8"))
+        weights = payload.get("weights")
+        if not isinstance(weights, dict):
+            raise ValueError("reranker_weights.json must contain a weights object")
+        return tuple(float(weights[name]) for name in RERANK_FEATURE_NAMES)
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -232,13 +265,13 @@ class Agent:
             return 1.0 if price <= float(maximum.group(1)) else -1.0
         return 0.0
 
-    def _structured_score(
+    def _compatibility_features(
         self,
         parent_asin: str,
         query_terms: list[str],
         constraints: list[str],
         query_text: str,
-    ) -> float:
+    ) -> tuple[float, ...]:
         title, categories, features, details, store, description, price = self._product_views[parent_asin]
         field_texts = (title, categories, features, details, store, description)
         field_terms = [set(_terms(text)) for text in field_texts]
@@ -251,6 +284,7 @@ class Agent:
         title_coverage = len(query_set & field_terms[0]) / denominator
         category_coverage = len(query_set & field_terms[1]) / denominator
         attribute_coverage = len(query_set & (field_terms[2] | field_terms[3])) / denominator
+        description_coverage = len(query_set & field_terms[5]) / denominator
 
         constraint_coverages: list[float] = []
         exact_phrases = 0
@@ -280,18 +314,65 @@ class Agent:
         )
         budget_match = self._budget_score(query_text, price)
 
+        return (
+            coverage,
+            title_coverage,
+            category_coverage,
+            attribute_coverage,
+            description_coverage,
+            constraint_coverage,
+            exact_fraction,
+            material_match,
+            color_match,
+            budget_match,
+        )
+
+    def _feature_vector(
+        self,
+        parent_asin: str,
+        rank: int,
+        state: dict[str, object],
+        query_terms: list[str],
+        constraints: list[str],
+        query_text: str,
+    ) -> tuple[float, ...]:
+        compatibility = self._compatibility_features(
+            parent_asin,
+            query_terms,
+            constraints,
+            query_text,
+        )
+        popularity = self._popularity.get(parent_asin, 0.0) / max(1.0, self._max_popularity)
+        exploratory = bool(state["exploratory"])
+        retrieval = 1.0 / math.log2(rank + 1.0)
+        return (
+            retrieval,
+            *compatibility,
+            popularity,
+            popularity if exploratory else 0.0,
+            compatibility[5] if not exploratory else 0.0,
+        )
+
+    @staticmethod
+    def _fallback_structured_score(features: tuple[float, ...]) -> float:
+        (
+            _, coverage, title_coverage, category_coverage, attribute_coverage,
+            description_coverage, constraint_coverage, exact_fraction,
+            material_match, color_match, budget_match, _, _, _,
+        ) = features
         raw = (
             3.0 * coverage
             + 0.6 * title_coverage
             + 0.9 * category_coverage
             + 1.6 * attribute_coverage
+            + 0.3 * description_coverage
             + 2.2 * constraint_coverage
             + 0.8 * exact_fraction
             + 0.6 * material_match
             + 0.5 * color_match
             + 0.8 * budget_match
         )
-        return raw / 11.0
+        return raw / 11.3
 
     def _rerank(
         self,
@@ -306,14 +387,25 @@ class Agent:
         structured_weight = 0.10 if state["exploratory"] else 0.15
         scored: list[tuple[float, int, str]] = []
         for rank, parent_asin in enumerate(candidates, start=1):
-            retrieval_score = 1.0 / math.log2(rank + 1.0)
-            compatibility = self._structured_score(
+            features = self._feature_vector(
                 parent_asin,
+                rank,
+                state,
                 query_terms,
                 constraints,
                 query_text,
             )
-            final_score = (1.0 - structured_weight) * retrieval_score + structured_weight * compatibility
+            if self._reranker_weights is None:
+                compatibility = self._fallback_structured_score(features)
+                final_score = (
+                    (1.0 - structured_weight) * features[0]
+                    + structured_weight * compatibility
+                )
+            else:
+                final_score = sum(
+                    weight * value
+                    for weight, value in zip(self._reranker_weights, features, strict=True)
+                )
             scored.append((final_score, rank, parent_asin))
         scored.sort(key=lambda item: (-item[0], item[1], item[2]))
         return [parent_asin for _, _, parent_asin in scored[:top_k]]
@@ -356,6 +448,8 @@ class Agent:
             disjunctive_weight=1.0 if state["exploratory"] else 2.0,
             popularity_weight=0.0 if state["exploratory"] else 1.0,
         )
+        state["last_candidates"] = candidates
+        state["last_query_terms"] = unique_terms
         recommendations = [
             {"parent_asin": parent_asin}
             for parent_asin in self._rerank(candidates, state, unique_terms, top_k)
