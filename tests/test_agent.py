@@ -77,6 +77,17 @@ class AgentStateTest(unittest.TestCase):
         self.assertLessEqual(len(response["recommendations"]), 10)
         self.assertTrue({item["parent_asin"] for item in response["recommendations"]} <= {"A", "B"})
 
+    def test_constraint_phrases_distill_accumulated_messages(self) -> None:
+        phrases = self.agent._constraint_phrases([
+            "I'm looking for accessories belts. A key requirement is: leather.",
+            "For that, what matters is: buckle closure; color: black.",
+        ])
+        self.assertEqual(phrases, ["leather", "buckle closure", "color: black"])
+
+    def test_budget_score_respects_explicit_maximum(self) -> None:
+        self.assertEqual(self.agent._budget_score("I need this under $100", 90.0), 1.0)
+        self.assertEqual(self.agent._budget_score("I need this under $100", 120.0), -1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
