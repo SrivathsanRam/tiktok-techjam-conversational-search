@@ -1,0 +1,38 @@
+{
+  "model": "pairwise_logistic_regression",
+  "training_partition": "cp2_dev_150",
+  "manifest_sha256": "e849327e8628835ae80ce2c97399ab7452fb4756a852cf1952b35780ce15b56b",
+  "regularization_C": 1.0,
+  "features": [
+    "retrieval",
+    "coverage",
+    "title_coverage",
+    "category_coverage",
+    "attribute_coverage",
+    "description_coverage",
+    "constraint_coverage",
+    "exact_fraction",
+    "material_match",
+    "color_match",
+    "budget_match",
+    "popularity",
+    "exploratory_popularity",
+    "specific_constraint"
+  ],
+  "weights": {
+    "retrieval": 1.170139845079,
+    "coverage": 2.995352076446,
+    "title_coverage": -0.608238261125,
+    "category_coverage": 8.965232816435,
+    "attribute_coverage": 0.162065900617,
+    "description_coverage": 0.327689646845,
+    "constraint_coverage": 0.970935493437,
+    "exact_fraction": 8.176158752712,
+    "material_match": 1.990755476661,
+    "color_match": 2.376820714272,
+    "budget_match": -0.00019834457,
+    "popularity": 10.801775682325,
+    "exploratory_popularity": 2.10580101053,
+    "specific_constraint": 0.013772770174
+  }
+}

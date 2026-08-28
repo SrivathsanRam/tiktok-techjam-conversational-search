@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from starter.agent import Agent
+from starter.agent import Agent, RERANK_FEATURE_NAMES
 
 
 class AgentStateTest(unittest.TestCase):
@@ -87,6 +87,10 @@ class AgentStateTest(unittest.TestCase):
     def test_budget_score_respects_explicit_maximum(self) -> None:
         self.assertEqual(self.agent._budget_score("I need this under $100", 90.0), 1.0)
         self.assertEqual(self.agent._budget_score("I need this under $100", 120.0), -1.0)
+
+    def test_learned_reranker_schema_matches_runtime_features(self) -> None:
+        if self.agent._reranker_weights is not None:
+            self.assertEqual(len(self.agent._reranker_weights), len(RERANK_FEATURE_NAMES))
 
 
 if __name__ == "__main__":
