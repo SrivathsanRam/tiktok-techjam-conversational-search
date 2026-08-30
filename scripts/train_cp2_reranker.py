@@ -118,7 +118,7 @@ def pairwise_examples(groups: list[dict], sample_ids: set[str]) -> tuple[np.ndar
         matrix = np.asarray(group["features"], dtype=np.float64)
         positive = matrix[group["target_index"]]
         negative_indices = [
-            index for index in range(min(30, len(matrix)))
+            index for index in range(min(80, len(matrix)))
             if index != group["target_index"]
         ]
         for index in negative_indices:
@@ -188,7 +188,7 @@ def evaluate_weights(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the cp2 dev-only linear pairwise reranker")
+    parser = argparse.ArgumentParser(description="Train the cp3 dev-only linear pairwise reranker")
     parser.add_argument("--catalog", type=Path, default=Path("data/catalog.jsonl"))
     parser.add_argument("--dataset", type=Path, default=Path("data/public_set.jsonl"))
     parser.add_argument("--manifest", type=Path, default=Path("data/cp2_split.json"))
@@ -255,7 +255,7 @@ def main() -> None:
     manifest_hash = hashlib.sha256(args.manifest.read_bytes()).hexdigest()
     weights_payload = {
         "model": "pairwise_logistic_regression",
-        "training_partition": "cp2_dev_150",
+        "training_partition": "cp3_dev_150",
         "manifest_sha256": manifest_hash,
         "regularization_C": selected["C"],
         "features": list(RERANK_FEATURE_NAMES),
@@ -265,7 +265,7 @@ def main() -> None:
         },
     }
     report = {
-        "protocol": "cp2-dev-only-five-fold-v1",
+        "protocol": "cp3-dev-only-five-fold-v1",
         "manifest_sha256": manifest_hash,
         "sample_count": len(dev_ids),
         "group_count": len(groups),

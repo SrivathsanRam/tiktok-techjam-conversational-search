@@ -4,6 +4,7 @@ import json
 import math
 import re
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 
@@ -24,6 +25,8 @@ RERANK_FEATURE_NAMES = (
     "popularity",
     "exploratory_popularity",
     "specific_constraint",
+    "exact_evidence_coverage",
+    "exact_evidence_rarity",
 )
 MATERIAL_TERMS = {
     "cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric",
@@ -60,6 +63,11 @@ def _terms(text: str) -> list[str]:
     ]
 
 
+def _normalized_value(text: str) -> str:
+    """Normalize a complete catalog value without discarding low-information words."""
+    return " ".join(token.lower() for token in TOKEN_RE.findall(text))
+
+
 class Agent:
     """Offline stateful agent with adaptive multi-route lexical retrieval."""
 
@@ -67,12 +75,26 @@ class Agent:
         self,
         catalog_path: str | Path = "data/catalog.jsonl",
         load_reranker: bool = True,
+        use_exact_evidence: bool = True,
+        exact_candidate_limit: int = 60,
+        exact_single_max_df: int = 50000,
+        rerank_candidate_limit: int = 80,
+        use_coverage_rotation: bool = True,
+        coverage_head: int = 0,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, dict[str, object]] = {}
         self._popularity: dict[str, float] = {}
         self._product_views: dict[str, tuple[str, str, str, str, str, str, float | None]] = {}
+        self._use_exact_evidence = use_exact_evidence
+        self._exact_candidate_limit = exact_candidate_limit
+        self._exact_single_max_df = exact_single_max_df
+        self._rerank_candidate_limit = rerank_candidate_limit
+        self._use_coverage_rotation = use_coverage_rotation
+        self._coverage_head = coverage_head
+        self._exact_cache: dict[str, tuple[str, ...]] = {}
+        self._exact_membership_cache: dict[str, frozenset[str]] = {}
         self._build_index()
         self._max_popularity = max(self._popularity.values(), default=1.0)
         self._reranker_weights = self._load_reranker_weights() if load_reranker else None
@@ -95,7 +117,13 @@ class Agent:
             "parent_asin UNINDEXED, title, categories, features, details, store, description, "
             "tokenize='unicode61 remove_diacritics 2')"
         )
+        if self._use_exact_evidence:
+            cursor.execute(
+                "CREATE TABLE evidence_values ("
+                "normalized_value TEXT NOT NULL, parent_asin TEXT NOT NULL)"
+            )
         batch: list[tuple[str, str, str, str, str, str, str]] = []
+        evidence_batch: list[tuple[str, str]] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
                 product = json.loads(line)
@@ -135,11 +163,64 @@ class Agent:
                         description,
                     )
                 )
+                if self._use_exact_evidence:
+                    raw_values: list[str] = []
+                    for field in (product.get("features"), product.get("details")):
+                        if isinstance(field, dict):
+                            raw_values.extend(
+                                f"{key}: {value}"
+                                for key, value in field.items()
+                                if value not in (None, "", [])
+                            )
+                        elif isinstance(field, list):
+                            raw_values.extend(
+                                str(value) for value in field if value not in (None, "")
+                            )
+                        elif field not in (None, ""):
+                            raw_values.append(str(field))
+                    searchable = " ".join(
+                        (title, categories, features, details, store, description)
+                    ).lower()
+                    searchable_terms = set(_terms(searchable))
+                    raw_values.extend(MATERIAL_TERMS & searchable_terms)
+                    raw_values.extend(
+                        f"color: {color}" for color in COLOR_TERMS & searchable_terms
+                    )
+                    # Simulator replies use semicolons as a multi-constraint
+                    # delimiter even when a single catalog feature contains them.
+                    # Index both the complete value and each disclosed fragment.
+                    raw_values.extend(
+                        fragment.strip()
+                        for value in tuple(raw_values)
+                        for fragment in value.split(";")
+                        if fragment.strip() and fragment.strip() != value.strip()
+                    )
+                    evidence_batch.extend(
+                        (normalized, parent_asin)
+                        for normalized in {
+                            _normalized_value(value) for value in raw_values
+                        }
+                        if normalized
+                    )
                 if len(batch) >= 1000:
                     cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
                     batch.clear()
+                    if self._use_exact_evidence:
+                        cursor.executemany(
+                            "INSERT INTO evidence_values VALUES (?, ?)",
+                            evidence_batch,
+                        )
+                        evidence_batch.clear()
         if batch:
             cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+        if self._use_exact_evidence and evidence_batch:
+            cursor.executemany(
+                "INSERT INTO evidence_values VALUES (?, ?)", evidence_batch
+            )
+        if self._use_exact_evidence:
+            cursor.execute(
+                "CREATE INDEX evidence_value_idx ON evidence_values(normalized_value)"
+            )
         self.connection.commit()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
@@ -148,6 +229,8 @@ class Agent:
             "exploratory": False,
             "messages": [],
             "user_profile": user_profile,
+            "shown": set(),
+            "last_signature": None,
         }
 
     @staticmethod
@@ -251,6 +334,79 @@ class Agent:
                 break
         return list(dict.fromkeys(phrases))
 
+    def _evidence_postings(self, phrase: str) -> tuple[str, ...]:
+        normalized = _normalized_value(phrase)
+        if not normalized or not self._use_exact_evidence:
+            return ()
+        cached = self._exact_cache.get(normalized)
+        if cached is not None:
+            return cached
+        rows = self.connection.execute(
+            "SELECT parent_asin FROM evidence_values WHERE normalized_value = ?",
+            (normalized,),
+        ).fetchall()
+        postings = tuple(str(row[0]) for row in rows)
+        self._exact_cache[normalized] = postings
+        return postings
+
+    def _exact_evidence_candidates(self, constraints: list[str]) -> list[str]:
+        """Rank products by the amount and rarity of verbatim catalog evidence."""
+        postings = [
+            values for constraint in constraints
+            if (values := self._evidence_postings(constraint))
+        ]
+        if not postings:
+            return []
+        matches: Counter[str] = Counter()
+        rarity: dict[str, float] = {}
+        for values in postings:
+            evidence_weight = math.log((50000.0 + 1.0) / (len(values) + 1.0))
+            for parent_asin in values:
+                matches[parent_asin] += 1
+                rarity[parent_asin] = rarity.get(parent_asin, 0.0) + evidence_weight
+        strongest_match_count = max(matches.values(), default=0)
+        if strongest_match_count == 1 and len(postings[0]) > self._exact_single_max_df:
+            return []
+        strongest = [
+            parent_asin
+            for parent_asin, match_count in matches.items()
+            if match_count == strongest_match_count
+        ]
+        return sorted(
+            strongest,
+            key=lambda asin: (
+                -matches[asin],
+                -rarity[asin],
+                -self._popularity.get(asin, 0.0),
+                asin,
+            ),
+        )[:self._exact_candidate_limit]
+
+    def _exact_evidence_features(
+        self, parent_asin: str, constraints: list[str]
+    ) -> tuple[float, float]:
+        matched_values = 0
+        matched_rarity = 0.0
+        indexed_constraints = 0
+        max_idf = math.log((50000.0 + 1.0) / 2.0)
+        for constraint in constraints:
+            normalized = _normalized_value(constraint)
+            postings = self._evidence_postings(constraint)
+            if not normalized or not postings:
+                continue
+            indexed_constraints += 1
+            members = self._exact_membership_cache.get(normalized)
+            if members is None:
+                members = frozenset(postings)
+                self._exact_membership_cache[normalized] = members
+            if parent_asin in members:
+                matched_values += 1
+                matched_rarity += math.log(
+                    (50000.0 + 1.0) / (len(postings) + 1.0)
+                ) / max_idf
+        denominator = max(1, indexed_constraints)
+        return matched_values / denominator, matched_rarity / denominator
+
     @staticmethod
     def _budget_score(query_text: str, price: float | None) -> float:
         if price is None:
@@ -345,12 +501,17 @@ class Agent:
         popularity = self._popularity.get(parent_asin, 0.0) / max(1.0, self._max_popularity)
         exploratory = bool(state["exploratory"])
         retrieval = 1.0 / math.log2(rank + 1.0)
+        exact_coverage, exact_rarity = self._exact_evidence_features(
+            parent_asin, constraints
+        )
         return (
             retrieval,
             *compatibility,
             popularity,
             popularity if exploratory else 0.0,
             compatibility[5] if not exploratory else 0.0,
+            exact_coverage,
+            exact_rarity,
         )
 
     @staticmethod
@@ -358,7 +519,7 @@ class Agent:
         (
             _, coverage, title_coverage, category_coverage, attribute_coverage,
             description_coverage, constraint_coverage, exact_fraction,
-            material_match, color_match, budget_match, _, _, _,
+            material_match, color_match, budget_match, _, _, _, _, _,
         ) = features
         raw = (
             3.0 * coverage
@@ -448,11 +609,43 @@ class Agent:
             disjunctive_weight=1.0 if state["exploratory"] else 2.0,
             popularity_weight=0.0 if state["exploratory"] else 1.0,
         )
+        constraints = self._constraint_phrases(state["messages"])
+        exact_candidates = self._exact_evidence_candidates(constraints)
+        if exact_candidates:
+            exact_set = set(exact_candidates)
+            candidates = (
+                exact_candidates
+                + [candidate for candidate in candidates if candidate not in exact_set]
+            )[:self._rerank_candidate_limit]
         state["last_candidates"] = candidates
         state["last_query_terms"] = unique_terms
+        ranked = self._rerank(candidates, state, unique_terms, len(candidates))
+        signature = tuple(unique_terms)
+        shown = state["shown"]
+        if (
+            self._use_coverage_rotation
+            and state["last_signature"] == signature
+            and isinstance(shown, set)
+        ):
+            head = ranked[:self._coverage_head]
+            selected = head + [
+                parent_asin for parent_asin in ranked[self._coverage_head:]
+                if parent_asin not in shown
+            ][:max(0, top_k - len(head))]
+            if len(selected) < top_k:
+                selected_set = set(selected)
+                selected.extend(
+                    parent_asin for parent_asin in ranked
+                    if parent_asin not in selected_set
+                )
+                selected = selected[:top_k]
+        else:
+            selected = ranked[:top_k]
+        if isinstance(shown, set):
+            shown.update(selected)
+        state["last_signature"] = signature
         recommendations = [
-            {"parent_asin": parent_asin}
-            for parent_asin in self._rerank(candidates, state, unique_terms, top_k)
+            {"parent_asin": parent_asin} for parent_asin in selected
         ]
         return {
             "message": "Here are the closest matches. What other requirement matters most?",

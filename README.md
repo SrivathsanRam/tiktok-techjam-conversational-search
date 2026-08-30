@@ -46,6 +46,15 @@ The command writes per-session results and aggregate metrics to `results.json`.
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 
+## CP3 Agent
+
+The `sri-experiment-cp3` implementation is an offline evidence-funnel agent:
+stateful BM25/RRF retrieval, exact catalog-value matching, a 16-feature linear
+reranker, and coverage-aware multi-turn rotation. Its recorded public result is
+Hit Rate@10 `0.995`, MRR `0.845734`, MTTC `1.93`, and TechnicalScore `0.932620`.
+See `CP3_EXPERIMENTS.md` for leakage controls, value sweeps, rejected variants,
+target-disjoint validation, resource tradeoffs, and reproduction commands.
+
 ## Agent Interface
 
 ```python

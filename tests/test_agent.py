@@ -17,7 +17,7 @@ class AgentStateTest(unittest.TestCase):
                 "parent_asin": "A",
                 "title": "Black leather belt",
                 "categories": ["Accessories", "Belts"],
-                "features": ["Full grain leather", "Buckle closure"],
+                "features": ["Full grain leather", "Buckle closure; Imported"],
                 "details": {"department": "mens"},
                 "store": "Example",
                 "description": ["Everyday belt"],
@@ -91,6 +91,22 @@ class AgentStateTest(unittest.TestCase):
     def test_learned_reranker_schema_matches_runtime_features(self) -> None:
         if self.agent._reranker_weights is not None:
             self.assertEqual(len(self.agent._reranker_weights), len(RERANK_FEATURE_NAMES))
+
+    def test_exact_evidence_indexes_semicolon_fragments(self) -> None:
+        self.assertEqual(self.agent._evidence_postings("Imported"), ("A",))
+        self.assertEqual(self.agent._exact_evidence_candidates(["buckle closure"]), ["A"])
+
+    def test_repeated_query_rotates_already_shown_results(self) -> None:
+        first = self.agent.respond(
+            "session", "I'm looking for accessories belts, but I'm still exploring.", 1, 1
+        )
+        second = self.agent.respond(
+            "session", "I don't have an additional preference for other.", 2, 1
+        )
+        self.assertNotEqual(
+            first["recommendations"][0]["parent_asin"],
+            second["recommendations"][0]["parent_asin"],
+        )
 
 
 if __name__ == "__main__":
