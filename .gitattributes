@@ -1,2 +1,0 @@
-models/cp4-tinybert-reranker/model_quint8_avx2.onnx binary
-models/cp4-tinybert-reranker/tokenizer.json -text

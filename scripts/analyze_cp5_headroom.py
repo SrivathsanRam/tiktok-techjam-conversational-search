@@ -48,7 +48,6 @@ def main() -> None:
     catalog_ids, categories, products = catalog_index(args.catalog)
     agent = Agent(
         args.catalog,
-        use_cross_encoder=False,
         use_dialogue_cards=True,
         dialogue_tiebreak="popularity",
         opening_output_k=1,

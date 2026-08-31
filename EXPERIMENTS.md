@@ -636,7 +636,6 @@ python3 -m scripts.evaluate_cp6_variant full --output data/releases/cp6/final/fu
 
 # Earlier checkpoint variant runners
 python3 -m scripts.evaluate_cp5_variant full --output data/releases/cp5/final/full.json
-python3 -m scripts.evaluate_cp4_variant full --output data/releases/cp4/final/full.json
 
 # Target-disjoint synthetic sets and confirmation runs (see README_DEV.md)
 python3 -m scripts.create_cp4_synthetic_sets
@@ -654,6 +653,27 @@ python3 -m scripts.train_cp3_reranker --report-output data/releases/cp3/final/cv
 ```
 
 The CP4 cross-encoder training pipeline (data building, splitting, training,
-ONNX export, and the PyTorch/ONNX/quantized parity check) is documented in
-`fine-tune/README.md`; the shipped model hash and provenance are in
-`models/cp4-tinybert-reranker/manifest.json`.
+ONNX export, and the PyTorch/ONNX/quantized parity check), the quantized model
+asset, its provenance manifests, and `scripts.evaluate_cp4_variant` were
+removed from `main` in the post-CP6 cleanup below; they are preserved intact
+on the `sri-experiment-cp4` branch (`fine-tune/README.md` and
+`models/cp4-tinybert-reranker/manifest.json` there).
+
+---
+
+## Post-CP6 cleanup: neural-path removal
+
+After CP6 froze, the disabled cross-encoder path was removed from `main` to
+slim the submission: the 5.0 MB `models/` asset (about 90% of the tracked
+repository size), `starter/cp4_cross_encoder.py`, the `fine-tune/` pipeline,
+`requirements-cp4.txt`, the cross-encoder options in `Agent` and the variant
+scripts, and the three model-specific unit tests. The model had been inert
+since CP5's no-effect ablation (weights zero by default, `use_cross_encoder`
+defaulting to `False`), so no scored behavior changed.
+
+| Change | Partition | HitRate@10 | MRR | MTTC | TechnicalScore | Decision |
+|---|---|---:|---:|---:|---:|---|
+| Remove disabled cross-encoder path | Public 200 | 1.0 | 1.0 | 2.100 | 0.978000 | Keep: exact baseline reproduction, all scenario aggregates unchanged |
+
+The remaining 20 unit tests pass. The runtime is now standard-library-only
+with no optional third-party dependency at all.

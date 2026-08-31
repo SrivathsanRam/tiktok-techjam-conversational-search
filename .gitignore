@@ -1,10 +1,5 @@
 __pycache__/
 *.py[cod]
-venv-cp4/
-fine-tune/artifacts/
-fine-tune/cache/
-fine-tune/data/*.jsonl
-models/cp4-tinybert-reranker/model.onnx
 .DS_Store
 .env
 results.json
@@ -14,18 +9,11 @@ results.json
 .venv/
 venv/
 .venv-train/
-venv-cp4/
 
 # Catalog download; unpack into data/catalog.jsonl
 catalog.jsonl.gz
 data/catalog.jsonl
 data/releases/
-
-# CP4 fine-tune artifacts (generated, not source)
-fine-tune/artifacts/
-fine-tune/cache/
-fine-tune/data/*.jsonl
-models/cp4-tinybert-reranker/model.onnx
 
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/

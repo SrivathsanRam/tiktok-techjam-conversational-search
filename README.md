@@ -92,11 +92,11 @@ evaluator internals.
    rotate out and the next unseen ranked products are exposed.
 8. **Protocol guard and fallbacks.** The card path activates only for
    recognized dialogue templates; free-form or drifted wording falls back to
-   the general lexical funnel (steps 2–4). A fine-tuned 4.49 MB TinyBERT
-   cross-encoder (`models/cp4-tinybert-reranker/`) exists from an earlier
-   checkpoint and is disabled by default after ablations showed no remaining
-   effect; if enabled and its dependency is missing, the agent degrades
-   gracefully to the linear ranking.
+   the general lexical funnel (steps 2–4). A fine-tuned TinyBERT cross-encoder
+   from an earlier checkpoint was disabled after ablations showed no remaining
+   effect, and has since been removed from `main` entirely (the model, its
+   training pipeline, and runtime wrapper are preserved on the
+   `sri-experiment-cp4` branch).
 
 ### Results by scenario (public 200)
 
@@ -132,8 +132,9 @@ whose targets are disjoint from all 200 public targets.
 ### Model choice, cost, and feasibility
 
 No LLM or external model is used at inference. The runtime is Python standard
-library plus SQLite FTS5; NumPy/scikit-learn (and PyTorch for the optional
-CP4 model) were used offline for training only.
+library plus SQLite FTS5; NumPy/scikit-learn (and PyTorch for the CP4-era
+cross-encoder experiment, preserved on the `sri-experiment-cp4` branch) were
+used offline for training only.
 
 - Estimated API cost: $0.00; reported tokens: 0 prompt / 0 completion.
 - No network, credentials, vector database, or GPU required.
@@ -192,10 +193,10 @@ python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/synthetic_de
 python3 -m tests.paraphrase_harness --limit 25   # UNOFFICIAL diagnostic
 ```
 
-**Optional — retraining.** Reranker training scripts and the CP4 cross-encoder
-fine-tuning pipeline are under `scripts/` and `fine-tune/` (see
-`fine-tune/README.md`); they require NumPy/scikit-learn (and PyTorch for the
-cross-encoder) but are never needed at runtime.
+**Optional — retraining.** Reranker training scripts are under `scripts/`
+(`train_cp2_reranker.py`, `train_cp3_reranker.py`); they require
+NumPy/scikit-learn but are never needed at runtime. The CP4 cross-encoder
+fine-tuning pipeline lives on the `sri-experiment-cp4` branch.
 
 ## Agent Interface
 
@@ -229,8 +230,6 @@ data/public_set.jsonl             200 labeled development sessions
 data/cp2_split.json               target-blind 150 dev / 50 holdout manifest
 scripts/                          experiment drivers, synthetic-set generators, trainers
 tests/                            unit tests and the unofficial paraphrase harness
-fine-tune/                        CP4 cross-encoder training pipeline (offline only)
-models/cp4-tinybert-reranker/     4.49 MB quantized ONNX model + provenance manifest
 EXPERIMENTS.md                    consolidated CP1–CP6 + unmerged-branch experiment ledger
 README_DEV.md                     synthetic test-case workflow
 docs/                             competition spec, FAQ, API contract, scoring config

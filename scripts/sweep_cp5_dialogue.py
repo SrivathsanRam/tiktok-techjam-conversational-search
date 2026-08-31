@@ -31,7 +31,6 @@ def main() -> None:
     parser.add_argument(
         "--tiebreaks", type=comma_strings, default=["popularity", "linear", "hybrid"]
     )
-    parser.add_argument("--with-cross-encoder", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 
@@ -43,7 +42,6 @@ def main() -> None:
     catalog_ids, categories, products = catalog_index(args.catalog)
     agent = Agent(
         args.catalog,
-        use_cross_encoder=args.with_cross_encoder,
         use_dialogue_cards=True,
         # Isolate opening width from the later ambiguity-abstention experiment.
         ambiguous_output_k=10,
@@ -57,7 +55,6 @@ def main() -> None:
             record = {
                 "dialogue_tiebreak": tiebreak,
                 "opening_output_k": opening_k,
-                "cross_encoder_loaded": agent._cross_encoder is not None,
                 **{key: value for key, value in result.items() if key != "sessions"},
             }
             results.append(record)
