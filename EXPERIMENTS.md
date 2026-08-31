@@ -613,7 +613,7 @@ submission report survives as documentation of the approach.
 Not an experiment line — it generalized the `arjo-cp4` synthetic-data and
 paraphrase tooling so `scripts.evaluate_cp4_confirm` and
 `tests.paraphrase_harness` test whichever agent is checked out. Merged into
-`main`; usage is documented in `DEV_README.md`.
+`main`; usage is documented in `README_DEV.md`.
 
 ---
 
@@ -638,7 +638,7 @@ python3 -m scripts.evaluate_cp6_variant full --output data/releases/cp6/final/fu
 python3 -m scripts.evaluate_cp5_variant full --output data/releases/cp5/final/full.json
 python3 -m scripts.evaluate_cp4_variant full --output data/releases/cp4/final/full.json
 
-# Target-disjoint synthetic sets and confirmation runs (see DEV_README.md)
+# Target-disjoint synthetic sets and confirmation runs (see README_DEV.md)
 python3 -m scripts.create_cp4_synthetic_sets
 python3 -m scripts.create_cp4_hardcase_set
 python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/synthetic_dev.jsonl

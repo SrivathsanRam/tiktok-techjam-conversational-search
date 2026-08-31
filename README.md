@@ -141,9 +141,10 @@ CP4 model) were used offline for training only.
   44 seconds (one-time, amortizable in a service) and evaluates 200 sessions
   in about 44 seconds.
 
-## Setup
+## Setup and Reproducing Our Results
 
-Python 3.10 or later. The runtime has no third-party dependencies.
+Python 3.10 or later is the only requirement — the runtime has no third-party
+dependencies, so there is nothing to `pip install` for the submitted agent.
 
 **1. Get the catalog.** Download `catalog.jsonl.gz` from the GitHub Release
 attached to this repository (verify against the published `SHA256SUMS`), then:
@@ -153,15 +154,18 @@ gzip -dk catalog.jsonl.gz
 mv catalog.jsonl data/catalog.jsonl
 ```
 
-**2. Run the evaluator.**
+**2. Run the official evaluator.**
 
 ```bash
 python3 -m evaluator.local_evaluator
 ```
 
 This runs all 200 public sessions against the agent in `starter/agent.py` and
-writes per-session results and aggregate metrics to `results.json`. Do not
-edit the evaluator or public labels when reporting a local score.
+writes per-session results and aggregate metrics to `results.json`. The run is
+deterministic; the aggregates should reproduce the headline result exactly:
+`hit_rate_at_10: 1.0`, `mrr: 1.0`, `mttc: 2.1`,
+`recommended_technical_score: 0.978`. Do not edit the evaluator or public
+labels when reporting a local score.
 
 **3. Run the tests.**
 
@@ -169,11 +173,16 @@ edit the evaluator or public labels when reporting a local score.
 python3 -m unittest discover tests
 ```
 
+To reproduce any intermediate checkpoint or ablation rather than the final
+agent, every experiment in [`EXPERIMENTS.md`](EXPERIMENTS.md) lists its
+branch, configuration, and exact commands (variant runners live under
+`scripts/`, e.g. `python3 -m scripts.evaluate_cp6_variant full`).
+
 **Optional — synthetic validation.** Larger target-disjoint session sets
 (deterministic seeds, official scenario mix) can be generated and evaluated
 through the real evaluator loop; the hard-case set stresses common-attribute,
 dense-neighborhood targets, and an unofficial paraphrase harness measures
-wording robustness. See [`DEV_README.md`](DEV_README.md) for the full
+wording robustness. See [`README_DEV.md`](README_DEV.md) for the full
 workflow:
 
 ```bash
@@ -223,10 +232,47 @@ tests/                            unit tests and the unofficial paraphrase harne
 fine-tune/                        CP4 cross-encoder training pipeline (offline only)
 models/cp4-tinybert-reranker/     4.49 MB quantized ONNX model + provenance manifest
 EXPERIMENTS.md                    consolidated CP1–CP6 + unmerged-branch experiment ledger
-DEV_README.md                     synthetic test-case workflow
+README_DEV.md                     synthetic test-case workflow
 docs/                             competition spec, FAQ, API contract, scoring config
 docs/baseline_results.json        weak-starter reference (HR 0.125, MRR 0.068, MTTC 9.81)
 ```
+
+## Limitations and What We Would Improve
+
+Honest caveats first: the headline numbers are as high as they are partly
+because the released simulator is deterministic, and our strongest mechanism
+leans on that.
+
+- **Protocol specialization.** The dialogue-card path reconstructs the exact
+  ordered evidence template the released simulator uses. The guard means
+  unrecognized wording degrades gracefully to the lexical funnel instead of
+  breaking, but on drifted phrasing performance falls toward the CP3/CP4 level
+  (roughly 0.93) rather than 0.978. Our unofficial paraphrase harness measures
+  this gap directly; closing it further was the main unfinished robustness
+  work.
+- **Lexical, not semantic.** Exact-evidence matching cannot recover a
+  constraint whose own tokens are reworded (say, "crimson" for a catalog value
+  of "red"). Dense retrieval and a fine-tuned cross-encoder were both built
+  and measured, and both lost to exact matching *on this protocol* — but on a
+  noisier private set that trade-off could reverse, and we would revisit the
+  neural fallback first.
+- **Irreducible ties.** The remaining errors are groups of products that are
+  observationally identical given every disclosable attribute; one synthetic
+  target sits at popularity rank 18 inside a 29-product equivalence class and
+  no ranking can find it sooner. A smarter question policy (asking the
+  attribute that maximally splits the current candidate group — prototyped on
+  an unmerged branch at a measured cost of −0.001) is the principled fix we
+  would pursue with more time.
+- **Cold start.** Building the FTS5, exact-value, card, and category indexes
+  takes about 44 seconds. Fine for a one-shot evaluation, but a service
+  deployment should serialize the prebuilt indexes instead of rebuilding them
+  at startup.
+- **Unmerged robustness work.** A parallel branch (`arjo-cp4`/`arjo-cp5`, see
+  [`EXPERIMENTS.md`](EXPERIMENTS.md)) hardened wording coverage — wider
+  override/no-preference/budget vocabularies and an index-gated n-gram
+  constraint fallback — and scored identically on the clean public set with a
+  measurably smaller paraphrase gap. Given more time we would unify those
+  parsers with the mainline agent rather than maintaining two lines.
 
 ## Data Source
 
