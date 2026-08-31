@@ -213,6 +213,12 @@ def run(
             "first_hit_turn": hit_turn,
             "best_rank": best_rank,
             "reciprocal_rank": 0.0 if best_rank is None else 1.0 / best_rank,
+            "dialogue_compatible": bool(
+                agent._sessions[session_id].get("dialogue_compatible")
+            ),
+            "dialogue_ever_active": bool(
+                agent._sessions[session_id].get("dialogue_ever_active")
+            ),
         })
     hit_rate = sum(int(item["hit"]) for item in sessions) / len(sessions)
     mrr = statistics.fmean(item["reciprocal_rank"] for item in sessions)
@@ -228,6 +234,14 @@ def run(
         "mttc": round(mttc, 6),
         "efficiency": round(efficiency, 6),
         "technical_score": round(0.5 * hit_rate + 0.3 * mrr + 0.2 * efficiency, 6),
+        "dialogue_compatible_rate": round(
+            sum(int(item["dialogue_compatible"]) for item in sessions) / len(sessions),
+            6,
+        ),
+        "dialogue_active_rate": round(
+            sum(int(item["dialogue_ever_active"]) for item in sessions) / len(sessions),
+            6,
+        ),
         "sessions": sessions,
     }
 

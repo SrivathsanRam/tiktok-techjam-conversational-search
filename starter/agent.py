@@ -166,6 +166,9 @@ class Agent:
                 if not dialogue_matches:
                     state["dialogue_compatible"] = False
         state["dialogue_active"] = bool(dialogue_matches)
+        state["dialogue_ever_active"] = (
+            bool(state.get("dialogue_ever_active")) or bool(dialogue_matches)
+        )
         state["last_dialogue_match_count"] = len(dialogue_matches)
 
         candidates = self.retrieval.search(

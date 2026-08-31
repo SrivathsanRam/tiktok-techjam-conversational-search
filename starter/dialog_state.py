@@ -41,6 +41,7 @@ class DialogState:
             "category_query": "",
             "dialogue_compatible": True,
             "dialogue_active": False,
+            "dialogue_ever_active": False,
             "last_dialogue_match_count": 0,
             "boundary_seen": False,
         }
@@ -71,6 +72,7 @@ class DialogState:
             state["last_signature"] = None
             state["dialogue_compatible"] = bool(state.get("category_query"))
             state["dialogue_active"] = False
+            state["dialogue_ever_active"] = False
             state["last_dialogue_match_count"] = 0
             state["boundary_seen"] = False
             messages = state["messages"]
