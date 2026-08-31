@@ -45,6 +45,10 @@ def main() -> None:
     parser.add_argument("--dialogue-boundary-linear-weight", type=float, default=0.0)
     parser.add_argument("--ambiguous-output-k", type=int, default=10)
     parser.add_argument("--authoritative-intent-mode", action="store_true")
+    parser.add_argument("--category-filter", action="store_true")
+    parser.add_argument("--exhaustion-release", action="store_true")
+    parser.add_argument("--ambiguity-release-turn", type=int, default=10)
+    parser.add_argument("--dialogue-rating-weight", type=float, default=0.0)
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -84,6 +88,10 @@ def main() -> None:
         dialogue_boundary_linear_weight=args.dialogue_boundary_linear_weight,
         ambiguous_output_k=args.ambiguous_output_k,
         use_authoritative_intent_mode=args.authoritative_intent_mode,
+        use_category_filter=args.category_filter,
+        use_exhaustion_release=args.exhaustion_release,
+        ambiguity_release_turn=args.ambiguity_release_turn,
+        dialogue_rating_weight=args.dialogue_rating_weight,
     )
     agent_init_seconds = time.perf_counter() - agent_started
     evaluation_started = time.perf_counter()
@@ -120,6 +128,10 @@ def main() -> None:
         "dialogue_boundary_linear_weight": args.dialogue_boundary_linear_weight,
         "ambiguous_output_k": args.ambiguous_output_k,
         "use_authoritative_intent_mode": args.authoritative_intent_mode,
+        "use_category_filter": args.category_filter,
+        "use_exhaustion_release": args.exhaustion_release,
+        "ambiguity_release_turn": args.ambiguity_release_turn,
+        "dialogue_rating_weight": args.dialogue_rating_weight,
         "catalog_load_seconds": round(catalog_load_seconds, 6),
         "agent_init_seconds": round(agent_init_seconds, 6),
         "evaluation_seconds": round(evaluation_seconds, 6),

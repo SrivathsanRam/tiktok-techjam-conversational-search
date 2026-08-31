@@ -11,7 +11,9 @@ from starter.cp4_cross_encoder import LocalCrossEncoder
 from starter.cp5_dialogue import (
     DialogueCardIndex,
     category_from_message,
+    coarse_category,
     message_is_protocol_compatible,
+    normalize_protocol_text,
 )
 
 
@@ -107,11 +109,17 @@ class Agent:
         dialogue_boundary_linear_weight: float = 0.0,
         ambiguous_output_k: int = 1,
         use_authoritative_intent_mode: bool = False,
+        use_category_filter: bool = True,
+        use_exhaustion_release: bool = False,
+        ambiguity_release_turn: int = 10,
+        dialogue_rating_weight: float = 0.0,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
         self._sessions: dict[str, dict[str, object]] = {}
         self._popularity: dict[str, float] = {}
+        self._average_rating: dict[str, float] = {}
+        self._known_categories: set[str] = set()
         self._product_views: dict[str, tuple[str, str, str, str, str, str, float | None]] = {}
         self._use_exact_evidence = use_exact_evidence
         self._exact_candidate_limit = exact_candidate_limit
@@ -140,6 +148,10 @@ class Agent:
         self._dialogue_boundary_linear_weight = dialogue_boundary_linear_weight
         self._ambiguous_output_k = ambiguous_output_k
         self._use_authoritative_intent_mode = use_authoritative_intent_mode
+        self._use_category_filter = use_category_filter
+        self._use_exhaustion_release = use_exhaustion_release
+        self._ambiguity_release_turn = ambiguity_release_turn
+        self._dialogue_rating_weight = dialogue_rating_weight
         self._exact_cache: dict[str, tuple[str, ...]] = {}
         self._exact_membership_cache: dict[str, frozenset[str]] = {}
         self._build_index()
@@ -168,7 +180,8 @@ class Agent:
         cursor = self.connection.cursor()
         cursor.execute(
             "CREATE VIRTUAL TABLE products USING fts5("
-            "parent_asin UNINDEXED, title, categories, features, details, store, description, "
+            "parent_asin UNINDEXED, coarse_category UNINDEXED, "
+            "title, categories, features, details, store, description, "
             "tokenize='unicode61 remove_diacritics 2')"
         )
         if self._use_exact_evidence:
@@ -176,7 +189,7 @@ class Agent:
                 "CREATE TABLE evidence_values ("
                 "normalized_value TEXT NOT NULL, parent_asin TEXT NOT NULL)"
             )
-        batch: list[tuple[str, str, str, str, str, str, str]] = []
+        batch: list[tuple[str, str, str, str, str, str, str, str]] = []
         evidence_batch: list[tuple[str, str]] = []
         with self.catalog_path.open(encoding="utf-8") as handle:
             for line in handle:
@@ -187,6 +200,17 @@ class Agent:
                 except (TypeError, ValueError):
                     rating_number = 0.0
                 self._popularity[parent_asin] = math.log1p(rating_number)
+                try:
+                    average_rating = min(
+                        5.0, max(0.0, float(product.get("average_rating") or 0.0))
+                    )
+                except (TypeError, ValueError):
+                    average_rating = 0.0
+                self._average_rating[parent_asin] = average_rating
+                category_key = _normalized_value(
+                    coarse_category(product.get("categories"))
+                )
+                self._known_categories.add(category_key)
                 title = _text(product.get("title"))
                 categories = _text(product.get("categories"))
                 features = _text(product.get("features"))
@@ -209,6 +233,7 @@ class Agent:
                 batch.append(
                     (
                         parent_asin,
+                        category_key,
                         title,
                         categories,
                         features,
@@ -257,7 +282,9 @@ class Agent:
                         if normalized
                     )
                 if len(batch) >= 1000:
-                    cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+                    cursor.executemany(
+                        "INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch
+                    )
                     batch.clear()
                     if self._use_exact_evidence:
                         cursor.executemany(
@@ -266,7 +293,9 @@ class Agent:
                         )
                         evidence_batch.clear()
         if batch:
-            cursor.executemany("INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)", batch)
+            cursor.executemany(
+                "INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch
+            )
         if self._use_exact_evidence and evidence_batch:
             cursor.executemany(
                 "INSERT INTO evidence_values VALUES (?, ?)", evidence_batch
@@ -289,16 +318,17 @@ class Agent:
             "protocol_compatible": True,
             "category_query": "",
             "boundary_seen": False,
+            "exhausted": False,
         }
 
     @staticmethod
     def _is_override(message: str) -> bool:
-        lowered = message.lower()
+        lowered = normalize_protocol_text(message).lower()
         return any(marker in lowered for marker in ("actually", "instead of", "forget ", "ignore my earlier"))
 
     @staticmethod
     def _has_preference(message: str) -> bool:
-        lowered = message.lower()
+        lowered = normalize_protocol_text(message).lower()
         return not any(
             marker in lowered
             for marker in (
@@ -316,14 +346,21 @@ class Agent:
         # that clause prevents an Intent Override from retaining the stale value.
         return message.split(".", 1)[0]
 
-    def _ranked_asins(self, expression: str, limit: int = 150) -> list[str]:
+    def _ranked_asins(
+        self, expression: str, limit: int = 150, category: str | None = None
+    ) -> list[str]:
         if not expression:
             return []
-        rows = self.connection.execute(
+        select = (
             "SELECT parent_asin FROM products WHERE products MATCH ? "
-            "ORDER BY bm25(products, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) LIMIT ?",
-            (expression, limit),
-        ).fetchall()
+            + ("AND coarse_category = ? " if category else "")
+            + "ORDER BY bm25(products, 0.0, 0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0) "
+            "LIMIT ?"
+        )
+        parameters: tuple[object, ...] = (
+            (expression, category, limit) if category else (expression, limit)
+        )
+        rows = self.connection.execute(select, parameters).fetchall()
         return [str(row[0]) for row in rows]
 
     def _fused_search(
@@ -333,6 +370,7 @@ class Agent:
         disjunctive_weight: float = 1.0,
         popularity_weight: float = 0.0,
         route_limit: int = 150,
+        category: str | None = None,
     ) -> list[str]:
         if not terms:
             return []
@@ -357,10 +395,21 @@ class Agent:
             if not expression:
                 continue
             for rank, parent_asin in enumerate(
-                self._ranked_asins(expression, route_limit), start=1
+                self._ranked_asins(expression, route_limit, category), start=1
             ):
                 scores[parent_asin] = scores.get(parent_asin, 0.0) + weight / (20.0 + rank)
                 best_route_rank[parent_asin] = min(best_route_rank.get(parent_asin, rank), rank)
+        # Fail open only when the complete category-scoped retrieval is empty;
+        # never mix a global route into an otherwise valid exact category pool.
+        if category and not scores:
+            return self._fused_search(
+                terms,
+                top_k,
+                disjunctive_weight=disjunctive_weight,
+                popularity_weight=popularity_weight,
+                route_limit=route_limit,
+                category=None,
+            )
         if popularity_weight > 0.0:
             popularity_ranking = sorted(
                 scores,
@@ -745,6 +794,17 @@ class Agent:
         if not matches:
             return ranked
         learned_rank = {asin: rank for rank, asin in enumerate(ranked, start=1)}
+
+        def popularity_key(asin: str) -> tuple[object, ...]:
+            popularity = self._popularity.get(asin, 0.0)
+            if self._dialogue_rating_weight <= 0.0:
+                return (-popularity, asin)
+            rating = self._average_rating.get(asin, 0.0)
+            combined = (
+                popularity / max(1.0, self._max_popularity)
+                + self._dialogue_rating_weight * rating / 5.0
+            )
+            return (-combined, -popularity, -rating, asin)
         tiebreak = self._dialogue_tiebreak
         if tiebreak == "mode":
             tiebreak = (
@@ -755,15 +815,13 @@ class Agent:
         if tiebreak == "linear":
             key = lambda asin: (
                 learned_rank.get(asin, len(ranked) + 1),
-                -self._popularity.get(asin, 0.0),
-                asin,
+                *popularity_key(asin),
             )
         elif self._dialogue_tiebreak == "hybrid":
             key = lambda asin: (
                 0 if asin in learned_rank else 1,
                 learned_rank.get(asin, len(ranked) + 1),
-                -self._popularity.get(asin, 0.0),
-                asin,
+                *popularity_key(asin),
             )
         elif tiebreak == "blend":
             if state.get("boundary_seen"):
@@ -776,7 +834,7 @@ class Agent:
                 linear_weight = self._dialogue_buying_linear_weight
             popularity_order = sorted(
                 matches,
-                key=lambda asin: (-self._popularity.get(asin, 0.0), asin),
+                key=popularity_key,
             )
             popularity_rank = {
                 asin: rank for rank, asin in enumerate(popularity_order, start=1)
@@ -792,7 +850,7 @@ class Agent:
                 asin,
             )
         else:
-            key = lambda asin: (-self._popularity.get(asin, 0.0), asin)
+            key = popularity_key
         prefix_ranked = sorted(matches, key=key)[: self._rerank_candidate_limit]
         prefix_set = set(prefix_ranked)
         return prefix_ranked + [asin for asin in ranked if asin not in prefix_set]
@@ -809,8 +867,11 @@ class Agent:
         state = self._sessions[session_id]
         if not message_is_protocol_compatible(user_message):
             state["protocol_compatible"] = False
-        if "don't have a preference for " in user_message.lower():
+        lowered_user_message = normalize_protocol_text(user_message).lower()
+        if "don't have a preference for " in lowered_user_message:
             state["boundary_seen"] = True
+        if "don't have an additional preference for " in lowered_user_message:
+            state["exhausted"] = True
         if turn == 1:
             state["base_message"] = self._base_intent(user_message)
             lowered = user_message.lower()
@@ -822,6 +883,7 @@ class Agent:
             state["category_query"] = category_from_message(user_message)
         elif self._is_override(user_message):
             state["override_seen"] = True
+            state["exhausted"] = False
             # Pre-override recommendations are ineligible for scoring and refer
             # to the superseded intent.  They must not suppress candidates from
             # post-override coverage rotation.
@@ -851,16 +913,31 @@ class Agent:
         else:
             disjunctive_weight = 1.0 if state["exploratory"] else 2.0
             popularity_weight = 0.0 if state["exploratory"] else 1.0
+        category_filter = None
+        if self._use_category_filter and bool(state.get("protocol_compatible")):
+            parsed_category = str(state.get("category_query", ""))
+            if parsed_category in self._known_categories:
+                category_filter = parsed_category
         candidates = self._fused_search(
             unique_terms,
             self._sparse_candidate_limit,
             disjunctive_weight=disjunctive_weight,
             popularity_weight=popularity_weight,
             route_limit=self._route_candidate_limit,
+            category=category_filter,
         )
         constraints = self._constraint_phrases(state["messages"])
         state["query_profile"] = self._query_profile(state)
         exact_candidates = self._exact_evidence_candidates(constraints)
+        if category_filter and self._dialogue_index is not None:
+            exact_candidates = [
+                asin
+                for asin in exact_candidates
+                if (
+                    (card := self._dialogue_index.cards.get(asin)) is not None
+                    and card.category == category_filter
+                )
+            ]
         if exact_candidates:
             exact_set = set(exact_candidates)
             candidates = (
@@ -907,7 +984,10 @@ class Agent:
             self._ambiguous_output_k < top_k
             # There is no later clarification opportunity on the final turn,
             # so expose the full rotated window instead of abstaining again.
-            and turn < 10
+            and turn < self._ambiguity_release_turn
+            and not (
+                self._use_exhaustion_release and bool(state.get("exhausted"))
+            )
             and bool(state.get("protocol_compatible"))
             and (
                 int(state.get("last_dialogue_match_count", 0)) > 1

@@ -18,6 +18,11 @@ TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 SEARCH_FIELDS = ("title", "features", "details", "description", "categories", "store")
 
 
+def normalize_protocol_text(message: str) -> str:
+    """Normalize harmless formatting differences in evaluator-style messages."""
+    return re.sub(r"\s+", " ", message.replace("’", "'").replace("‘", "'")).strip()
+
+
 def _flatten_values(value: object) -> list[str]:
     if isinstance(value, dict):
         return [
@@ -96,7 +101,7 @@ def candidate_sequence(product: dict) -> tuple[str, ...]:
 
 
 def message_is_protocol_compatible(message: str) -> bool:
-    lowered = message.lower()
+    lowered = normalize_protocol_text(message).lower()
     return any(
         marker in lowered
         for marker in (
@@ -111,7 +116,10 @@ def message_is_protocol_compatible(message: str) -> bool:
 
 
 def category_from_message(message: str) -> str:
-    match = re.search(r"i'm looking for\s+(.+?)(?:,\s*but|\.|$)", message, re.I)
+    normalized_message = normalize_protocol_text(message)
+    match = re.search(
+        r"i'm looking for\s+(.+?)(?:,\s*but|\.|$)", normalized_message, re.I
+    )
     return _normalized(match.group(1)) if match else ""
 
 

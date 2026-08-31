@@ -31,6 +31,15 @@ class AgentStateTest(unittest.TestCase):
                 "store": "Example",
                 "description": ["Casual belt"],
             },
+            {
+                "parent_asin": "C",
+                "title": "Red running sneakers",
+                "categories": ["Clothing", "Shoes", "Athletic Shoes"],
+                "features": ["Rubber sole"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Lightweight training shoes"],
+            },
         ]
         catalog_path.write_text(
             "".join(json.dumps(product) + "\n" for product in products),
@@ -97,6 +106,42 @@ class AgentStateTest(unittest.TestCase):
     def test_exact_evidence_indexes_semicolon_fragments(self) -> None:
         self.assertEqual(self.agent._evidence_postings("Imported"), ("A",))
         self.assertEqual(self.agent._exact_evidence_candidates(["buckle closure"]), ["A"])
+
+    def test_category_scoping_and_empty_scope_fail_open(self) -> None:
+        belts = self.agent._ranked_asins("mens", category="accessories belts")
+        shoes = self.agent._ranked_asins("mens", category="shoes athletic shoes")
+        self.assertEqual(set(belts), {"A", "B"})
+        self.assertEqual(shoes, ["C"])
+        self.assertIn(
+            "A", self.agent._fused_search(["leather"], 10, category="missing")
+        )
+
+    def test_boundary_and_true_exhaustion_are_distinct(self) -> None:
+        self.agent.respond(
+            "session",
+            "I'm looking for accessories belts, but I'm still exploring.",
+            1,
+            10,
+        )
+        self.agent.respond("session", "I don't have a preference for color.", 2, 10)
+        self.assertTrue(self.agent._sessions["session"]["boundary_seen"])
+        self.assertFalse(self.agent._sessions["session"]["exhausted"])
+
+        self.agent.reset("exhausted", {})
+        self.agent.respond(
+            "exhausted",
+            "I'm looking for accessories belts, but I'm still exploring.",
+            1,
+            10,
+        )
+        self.agent.respond(
+            "exhausted",
+            "I don't have an additional preference for other.",
+            2,
+            10,
+        )
+        self.assertFalse(self.agent._sessions["exhausted"]["boundary_seen"])
+        self.assertTrue(self.agent._sessions["exhausted"]["exhausted"])
 
     def test_repeated_query_rotates_already_shown_results(self) -> None:
         first = self.agent.respond(

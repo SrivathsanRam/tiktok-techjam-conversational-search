@@ -91,6 +91,22 @@ python -m scripts.evaluate_cp5_variant full --output data/releases/cp5/final/ful
 See `CP5_EXPERIMENTS.md` for the complete workflow, target-disjoint validation,
 all accepted and rejected strategies, runtime-parity audit, and limitations.
 
+## CP6 Agent
+
+The `sri-experiment-cp6` branch audits 15 public solutions and promotes the one
+remaining mechanism that improves CP5 consistently: exact coarse-category
+scoping inside every FTS5 retrieval route. It preserves full-public Hit Rate@10
+and MRR at `1.0`, reduces MTTC from `2.14` to `2.10`, and raises
+TechnicalScore from `0.977200` to `0.978000`. The gain repeats on the public
+development split, frozen holdout, and three target-disjoint validation sets.
+
+```bash
+python -m scripts.evaluate_cp6_variant full --output data/releases/cp6/final/full.json
+```
+
+See `CP6_EXPERIMENTS.md` for the pinned repository audit, isolated strategy
+grid, rejected neural/release/profile alternatives, and reproduction commands.
+
 ## Agent Interface
 
 ```python

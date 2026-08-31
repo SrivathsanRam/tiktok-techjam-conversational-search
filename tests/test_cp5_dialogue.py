@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from starter.cp5_dialogue import candidate_sequence, category_from_message
+from starter.cp5_dialogue import (
+    candidate_sequence,
+    category_from_message,
+    message_is_protocol_compatible,
+)
 
 
 class DialogueCardTest(unittest.TestCase):
@@ -33,6 +37,11 @@ class DialogueCardTest(unittest.TestCase):
             category_from_message("I'm looking for Men Shirts, but I'm still exploring."),
             "men shirts",
         )
+
+    def test_protocol_parser_accepts_curly_apostrophe_and_extra_whitespace(self) -> None:
+        message = "  I’m   looking for Men Shirts, but I’m still exploring.  "
+        self.assertTrue(message_is_protocol_compatible(message))
+        self.assertEqual(category_from_message(message), "men shirts")
 
 
 if __name__ == "__main__":
