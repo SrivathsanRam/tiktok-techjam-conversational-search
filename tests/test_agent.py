@@ -108,6 +108,33 @@ class AgentStateTest(unittest.TestCase):
             second["recommendations"][0]["parent_asin"],
         )
 
+    def test_query_profile_classifies_intent_and_accumulates_constraints(self) -> None:
+        self.agent.respond(
+            "session",
+            "I'm looking for accessories belts. A key requirement is: leather.",
+            1,
+            10,
+        )
+        self.agent.respond(
+            "session", "For that, what matters is: color: black.", 2, 10
+        )
+        profile = self.agent._sessions["session"]["query_profile"]
+        self.assertEqual(profile["intent"], "specific buying")
+        self.assertEqual(profile["hard_constraints"], ["leather", "color: black"])
+        self.assertEqual(profile["static_priorities"], ["durability"])
+
+    def test_intent_classifier_isolates_browsing_and_override(self) -> None:
+        browsing = {
+            "messages": ["I'm still exploring."],
+            "exploratory": True,
+            "override_seen": False,
+        }
+        self.assertEqual(self.agent._intent_mode(browsing), "exploratory browsing")
+        browsing["messages"].append("What matters is: leather.")
+        self.assertEqual(self.agent._intent_mode(browsing), "constrained browsing")
+        browsing["override_seen"] = True
+        self.assertEqual(self.agent._intent_mode(browsing), "intent override")
+
 
 if __name__ == "__main__":
     unittest.main()

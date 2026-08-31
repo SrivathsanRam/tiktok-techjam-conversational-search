@@ -1,0 +1,22 @@
+{
+  "name": "CP4 TinyBERT pairwise reranker",
+  "base_model": "cross-encoder/ms-marco-TinyBERT-L2-v2",
+  "base_revision": "81d1926f67cb8eee2c2be17ca9f793c7c3bd20cc",
+  "base_license": "Apache-2.0",
+  "architecture": "BERT sequence classifier, 2 layers, hidden size 128, 2 attention heads",
+  "parameters": 4386049,
+  "runtime_format": "ONNX dynamic QUInt8",
+  "model_file": "model_quint8_avx2.onnx",
+  "model_bytes": 4488138,
+  "model_sha256": "5d8d36309766a8175a18e3fee1280b5d1e411ddf6f489b590919052fcdcd4b0d",
+  "tokenizer_file": "tokenizer.json",
+  "tokenizer_sha256": "1b19820b21bee2ab9a5d3f2ac461f9517c4589536c7d751d60d38877993c5e8b",
+  "maximum_sequence_length": 160,
+  "selected_intent": "specific buying",
+  "selected_candidate_count": 20,
+  "selected_rrf_weight": 0.15,
+  "selected_minimum_constraints": 1,
+  "selected_minimum_logit_margin": 0.0,
+  "network_required_at_runtime": false,
+  "fallback": "CP3 exact + BM25/RRF + linear reranker"
+}

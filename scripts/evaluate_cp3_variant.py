@@ -20,8 +20,18 @@ def main() -> None:
     parser.add_argument("--exact-limit", type=int, default=60)
     parser.add_argument("--exact-single-max-df", type=int, default=50000)
     parser.add_argument("--rerank-limit", type=int, default=80)
+    parser.add_argument("--sparse-limit", type=int, default=60)
+    parser.add_argument("--route-limit", type=int, default=150)
     parser.add_argument("--no-rotation", action="store_true")
     parser.add_argument("--coverage-head", type=int, default=0)
+    parser.add_argument("--no-cross-encoder", action="store_true")
+    parser.add_argument("--cross-candidates", type=int, default=20)
+    parser.add_argument("--cross-buying-weight", type=float, default=0.0)
+    parser.add_argument("--cross-browsing-weight", type=float, default=0.0)
+    parser.add_argument("--cross-constrained-browsing-weight", type=float)
+    parser.add_argument("--cross-override-weight", type=float, default=0.0)
+    parser.add_argument("--cross-min-constraints", type=int, default=1)
+    parser.add_argument("--cross-min-margin", type=float, default=0.0)
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -40,8 +50,18 @@ def main() -> None:
         exact_candidate_limit=args.exact_limit,
         exact_single_max_df=args.exact_single_max_df,
         rerank_candidate_limit=args.rerank_limit,
+        sparse_candidate_limit=args.sparse_limit,
+        route_candidate_limit=args.route_limit,
         use_coverage_rotation=not args.no_rotation,
         coverage_head=args.coverage_head,
+        use_cross_encoder=not args.no_cross_encoder,
+        cross_encoder_candidates=args.cross_candidates,
+        cross_encoder_buying_weight=args.cross_buying_weight,
+        cross_encoder_browsing_weight=args.cross_browsing_weight,
+        cross_encoder_constrained_browsing_weight=args.cross_constrained_browsing_weight,
+        cross_encoder_override_weight=args.cross_override_weight,
+        cross_encoder_min_constraints=args.cross_min_constraints,
+        cross_encoder_min_margin=args.cross_min_margin,
     )
     agent_init_seconds = time.perf_counter() - agent_started
     evaluation_started = time.perf_counter()
@@ -53,8 +73,22 @@ def main() -> None:
         "exact_candidate_limit": args.exact_limit,
         "exact_single_max_df": args.exact_single_max_df,
         "rerank_candidate_limit": args.rerank_limit,
+        "sparse_candidate_limit": args.sparse_limit,
+        "route_candidate_limit": args.route_limit,
         "use_coverage_rotation": not args.no_rotation,
         "coverage_head": args.coverage_head,
+        "cross_encoder_loaded": agent._cross_encoder is not None,
+        "cross_encoder_candidates": args.cross_candidates,
+        "cross_encoder_buying_weight": args.cross_buying_weight,
+        "cross_encoder_browsing_weight": args.cross_browsing_weight,
+        "cross_encoder_constrained_browsing_weight": (
+            args.cross_buying_weight
+            if args.cross_constrained_browsing_weight is None
+            else args.cross_constrained_browsing_weight
+        ),
+        "cross_encoder_override_weight": args.cross_override_weight,
+        "cross_encoder_min_constraints": args.cross_min_constraints,
+        "cross_encoder_min_margin": args.cross_min_margin,
         "catalog_load_seconds": round(catalog_load_seconds, 6),
         "agent_init_seconds": round(agent_init_seconds, 6),
         "evaluation_seconds": round(evaluation_seconds, 6),

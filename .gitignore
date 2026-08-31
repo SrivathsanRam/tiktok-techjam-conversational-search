@@ -1,5 +1,10 @@
 __pycache__/
 *.py[cod]
+venv-cp4/
+fine-tune/artifacts/
+fine-tune/cache/
+fine-tune/data/*.jsonl
+models/cp4-tinybert-reranker/model.onnx
 .DS_Store
 .env
 results.json

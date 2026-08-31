@@ -55,6 +55,22 @@ Hit Rate@10 `0.995`, MRR `0.845734`, MTTC `1.93`, and TechnicalScore `0.932620`.
 See `CP3_EXPERIMENTS.md` for leakage controls, value sweeps, rejected variants,
 target-disjoint validation, resource tradeoffs, and reproduction commands.
 
+## CP4 Agent
+
+The `sri-experiment-cp4` branch adds a genuinely fine-tuned 2-layer TinyBERT
+cross-encoder. A deterministic intent classifier applies it only to the top 20
+specific-buying candidates; browsing, boundary, and override traffic retains
+the stronger CP3 lexical ranking. The 4.49 MB quantized ONNX model runs locally
+on CPU and falls back automatically to CP3 if ONNX Runtime is unavailable.
+
+```bash
+python -m pip install -r requirements-cp4.txt
+python -m evaluator.local_evaluator
+```
+
+No network, API key, vector service, PyTorch, or GPU is required at inference
+time. See `CP4_EXPERIMENTS.md` for the complete workflow and ablations.
+
 ## Agent Interface
 
 ```python

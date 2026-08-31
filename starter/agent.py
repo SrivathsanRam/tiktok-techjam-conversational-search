@@ -7,6 +7,8 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
+from starter.cp4_cross_encoder import LocalCrossEncoder
+
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
 RERANK_CANDIDATES = 60
@@ -79,8 +81,18 @@ class Agent:
         exact_candidate_limit: int = 60,
         exact_single_max_df: int = 50000,
         rerank_candidate_limit: int = 80,
+        sparse_candidate_limit: int = RERANK_CANDIDATES,
+        route_candidate_limit: int = 150,
         use_coverage_rotation: bool = True,
         coverage_head: int = 0,
+        use_cross_encoder: bool = True,
+        cross_encoder_candidates: int = 20,
+        cross_encoder_buying_weight: float = 0.15,
+        cross_encoder_browsing_weight: float = 0.0,
+        cross_encoder_constrained_browsing_weight: float | None = 0.0,
+        cross_encoder_override_weight: float = 0.0,
+        cross_encoder_min_constraints: int = 1,
+        cross_encoder_min_margin: float = 0.0,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
@@ -91,13 +103,30 @@ class Agent:
         self._exact_candidate_limit = exact_candidate_limit
         self._exact_single_max_df = exact_single_max_df
         self._rerank_candidate_limit = rerank_candidate_limit
+        self._sparse_candidate_limit = sparse_candidate_limit
+        self._route_candidate_limit = route_candidate_limit
         self._use_coverage_rotation = use_coverage_rotation
         self._coverage_head = coverage_head
+        self._cross_encoder_candidates = cross_encoder_candidates
+        self._cross_encoder_buying_weight = cross_encoder_buying_weight
+        self._cross_encoder_browsing_weight = cross_encoder_browsing_weight
+        self._cross_encoder_constrained_browsing_weight = (
+            cross_encoder_buying_weight
+            if cross_encoder_constrained_browsing_weight is None
+            else cross_encoder_constrained_browsing_weight
+        )
+        self._cross_encoder_override_weight = cross_encoder_override_weight
+        self._cross_encoder_min_constraints = cross_encoder_min_constraints
+        self._cross_encoder_min_margin = cross_encoder_min_margin
         self._exact_cache: dict[str, tuple[str, ...]] = {}
         self._exact_membership_cache: dict[str, frozenset[str]] = {}
         self._build_index()
         self._max_popularity = max(self._popularity.values(), default=1.0)
         self._reranker_weights = self._load_reranker_weights() if load_reranker else None
+        self._cross_encoder = (
+            LocalCrossEncoder.try_load() if load_reranker and use_cross_encoder else None
+        )
+        self._cross_cache: dict[tuple[str, tuple[str, ...]], tuple[float, ...]] = {}
 
     @staticmethod
     def _load_reranker_weights() -> tuple[float, ...] | None:
@@ -231,6 +260,7 @@ class Agent:
             "user_profile": user_profile,
             "shown": set(),
             "last_signature": None,
+            "override_seen": False,
         }
 
     @staticmethod
@@ -274,6 +304,7 @@ class Agent:
         top_k: int,
         disjunctive_weight: float = 1.0,
         popularity_weight: float = 0.0,
+        route_limit: int = 150,
     ) -> list[str]:
         if not terms:
             return []
@@ -297,7 +328,9 @@ class Agent:
         for expression, weight in expressions:
             if not expression:
                 continue
-            for rank, parent_asin in enumerate(self._ranked_asins(expression), start=1):
+            for rank, parent_asin in enumerate(
+                self._ranked_asins(expression, route_limit), start=1
+            ):
                 scores[parent_asin] = scores.get(parent_asin, 0.0) + weight / (20.0 + rank)
                 best_route_rank[parent_asin] = min(best_route_rank.get(parent_asin, rank), rank)
         if popularity_weight > 0.0:
@@ -571,6 +604,104 @@ class Agent:
         scored.sort(key=lambda item: (-item[0], item[1], item[2]))
         return [parent_asin for _, _, parent_asin in scored[:top_k]]
 
+    @staticmethod
+    def _intent_mode(state: dict[str, object]) -> str:
+        constraints = Agent._constraint_phrases(state.get("messages"))
+        if state.get("override_seen"):
+            return "intent override"
+        if state.get("exploratory"):
+            return "constrained browsing" if constraints else "exploratory browsing"
+        return "specific buying"
+
+    def _neural_query(self, state: dict[str, object]) -> str:
+        profile = self._query_profile(state)
+        constraints = profile["hard_constraints"]
+        tags = profile["static_priorities"]
+        return " ".join(
+            part for part in (
+                f"intent: {profile['intent']}.",
+                f"request: {profile['base_request']}.",
+                f"requirements: {'; '.join(constraints)}." if constraints else "",
+                f"profile priorities: {'; '.join(tags)}." if tags else "",
+            ) if part
+        )
+
+    def _query_profile(self, state: dict[str, object]) -> dict[str, object]:
+        """Build the current preference profile from the conversation evidence."""
+        constraints = self._constraint_phrases(state.get("messages"))
+        profile = state.get("user_profile")
+        tags = profile.get("preference_tags", []) if isinstance(profile, dict) else []
+        return {
+            "intent": self._intent_mode(state),
+            "base_request": str(state.get("base_message", "")),
+            "hard_constraints": constraints,
+            "static_priorities": [str(tag) for tag in tags],
+            "override_seen": bool(state.get("override_seen")),
+        }
+
+    def _neural_document(self, parent_asin: str) -> str:
+        title, categories, features, details, store, description, price = (
+            self._product_views[parent_asin]
+        )
+        price_text = "" if price is None else f" price: ${price:.2f}."
+        return (
+            f"title: {title}. category: {categories}. features: {features}. "
+            f"details: {details}. brand: {store}. description: {description}.{price_text}"
+        )
+
+    def _cross_rerank(
+        self, ranked: list[str], state: dict[str, object]
+    ) -> list[str]:
+        constraints = self._constraint_phrases(state.get("messages"))
+        if state.get("override_seen"):
+            weight = self._cross_encoder_override_weight
+        elif state.get("exploratory"):
+            weight = (
+                self._cross_encoder_constrained_browsing_weight
+                if constraints else self._cross_encoder_browsing_weight
+            )
+        else:
+            weight = self._cross_encoder_buying_weight
+        candidate_count = min(self._cross_encoder_candidates, len(ranked))
+        if (
+            self._cross_encoder is None
+            or candidate_count < 2
+            or weight <= 0.0
+            or len(constraints) < self._cross_encoder_min_constraints
+        ):
+            return ranked
+        candidates = ranked[:candidate_count]
+        query = self._neural_query(state)
+        cache_key = (query, tuple(candidates))
+        scores = self._cross_cache.get(cache_key)
+        if scores is None:
+            scores = tuple(self._cross_encoder.predict(
+                query, [self._neural_document(asin) for asin in candidates]
+            ))
+            self._cross_cache[cache_key] = scores
+        if self._cross_encoder_min_margin > 0.0:
+            two_best = sorted(scores, reverse=True)[:2]
+            if two_best[0] - two_best[1] < self._cross_encoder_min_margin:
+                return ranked
+        neural_order = sorted(
+            range(candidate_count), key=lambda index: (-scores[index], index)
+        )
+        neural_rank = {
+            candidate_index: rank
+            for rank, candidate_index in enumerate(neural_order, start=1)
+        }
+        fused = [
+            (
+                (1.0 - weight) / (20.0 + learned_rank)
+                + weight / (20.0 + neural_rank[learned_rank - 1]),
+                learned_rank,
+                parent_asin,
+            )
+            for learned_rank, parent_asin in enumerate(candidates, start=1)
+        ]
+        fused.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return [asin for _, _, asin in fused] + ranked[candidate_count:]
+
     def respond(
         self,
         session_id: str,
@@ -590,6 +721,7 @@ class Agent:
             )
             state["messages"] = [user_message]
         elif self._is_override(user_message):
+            state["override_seen"] = True
             messages = state["messages"]
             # The first message contains the stale preference used to set up an
             # override scenario.  Later replies contain separately disclosed hard
@@ -605,11 +737,13 @@ class Agent:
         unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
         candidates = self._fused_search(
             unique_terms,
-            RERANK_CANDIDATES,
+            self._sparse_candidate_limit,
             disjunctive_weight=1.0 if state["exploratory"] else 2.0,
             popularity_weight=0.0 if state["exploratory"] else 1.0,
+            route_limit=self._route_candidate_limit,
         )
         constraints = self._constraint_phrases(state["messages"])
+        state["query_profile"] = self._query_profile(state)
         exact_candidates = self._exact_evidence_candidates(constraints)
         if exact_candidates:
             exact_set = set(exact_candidates)
@@ -620,6 +754,8 @@ class Agent:
         state["last_candidates"] = candidates
         state["last_query_terms"] = unique_terms
         ranked = self._rerank(candidates, state, unique_terms, len(candidates))
+        ranked = self._cross_rerank(ranked, state)
+        state["last_ranking"] = ranked
         signature = tuple(unique_terms)
         shown = state["shown"]
         if (
