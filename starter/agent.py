@@ -76,7 +76,7 @@ class Agent:
         catalog_path: str | Path = "data/catalog.jsonl",
         load_reranker: bool = True,
         use_exact_evidence: bool = True,
-        exact_candidate_limit: int = 60,
+        exact_candidate_limit: int = 1000,
         exact_single_max_df: int = 50000,
         rerank_candidate_limit: int = 80,
         use_coverage_rotation: bool = True,
@@ -89,12 +89,17 @@ class Agent:
         self._product_views: dict[str, tuple[str, str, str, str, str, str, float | None]] = {}
         self._use_exact_evidence = use_exact_evidence
         self._exact_candidate_limit = exact_candidate_limit
+        self._exact_precision_limit = 60
         self._exact_single_max_df = exact_single_max_df
         self._rerank_candidate_limit = rerank_candidate_limit
         self._use_coverage_rotation = use_coverage_rotation
         self._coverage_head = coverage_head
         self._exact_cache: dict[str, tuple[str, ...]] = {}
         self._exact_membership_cache: dict[str, frozenset[str]] = {}
+        self._product_profile_cache: dict[
+            str, tuple[tuple[frozenset[str], ...], frozenset[str], str]
+        ] = {}
+        self._constraint_terms_cache: dict[str, frozenset[str]] = {}
         self._build_index()
         self._max_popularity = max(self._popularity.values(), default=1.0)
         self._reranker_weights = self._load_reranker_weights() if load_reranker else None
@@ -349,14 +354,22 @@ class Agent:
         self._exact_cache[normalized] = postings
         return postings
 
-    def _exact_evidence_candidates(self, constraints: list[str]) -> list[str]:
-        """Rank products by the amount and rarity of verbatim catalog evidence."""
+    def _exact_evidence_pool(
+        self, constraints: list[str]
+    ) -> tuple[list[str], dict[str, int]]:
+        """Rank products by the amount and rarity of verbatim catalog evidence.
+
+        Returns the full top dominance tier (every product satisfying the
+        maximum number of exact constraints, up to the safety cap) plus a map
+        from parent_asin to satisfied-constraint count for every product that
+        matched at least one exact constraint.
+        """
         postings = [
             values for constraint in constraints
             if (values := self._evidence_postings(constraint))
         ]
         if not postings:
-            return []
+            return [], {}
         matches: Counter[str] = Counter()
         rarity: dict[str, float] = {}
         for values in postings:
@@ -366,13 +379,13 @@ class Agent:
                 rarity[parent_asin] = rarity.get(parent_asin, 0.0) + evidence_weight
         strongest_match_count = max(matches.values(), default=0)
         if strongest_match_count == 1 and len(postings[0]) > self._exact_single_max_df:
-            return []
+            return [], {}
         strongest = [
             parent_asin
             for parent_asin, match_count in matches.items()
             if match_count == strongest_match_count
         ]
-        return sorted(
+        ordered = sorted(
             strongest,
             key=lambda asin: (
                 -matches[asin],
@@ -380,7 +393,16 @@ class Agent:
                 -self._popularity.get(asin, 0.0),
                 asin,
             ),
-        )[:self._exact_candidate_limit]
+        )
+        if len(ordered) > self._exact_candidate_limit:
+            # A tier wider than the safety cap is not a discriminative
+            # dominance signal (for example every cotton product), so keep the
+            # legacy precision slice and let the learned reranker order freely.
+            return ordered[:self._exact_precision_limit], {}
+        return ordered, dict(matches)
+
+    def _exact_evidence_candidates(self, constraints: list[str]) -> list[str]:
+        return self._exact_evidence_pool(constraints)[0]
 
     def _exact_evidence_features(
         self, parent_asin: str, constraints: list[str]
@@ -421,6 +443,29 @@ class Agent:
             return 1.0 if price <= float(maximum.group(1)) else -1.0
         return 0.0
 
+    def _product_profile(
+        self, parent_asin: str
+    ) -> tuple[tuple[frozenset[str], ...], frozenset[str], str]:
+        """Per-product term sets and token string, computed once and cached."""
+        cached = self._product_profile_cache.get(parent_asin)
+        if cached is not None:
+            return cached
+        title, categories, features, details, store, description, _ = self._product_views[parent_asin]
+        field_texts = (title, categories, features, details, store, description)
+        field_terms = tuple(frozenset(_terms(text)) for text in field_texts)
+        combined_terms = frozenset().union(*field_terms)
+        combined_token_string = " ".join(_terms(" ".join(field_texts)))
+        cached = (field_terms, combined_terms, combined_token_string)
+        self._product_profile_cache[parent_asin] = cached
+        return cached
+
+    def _constraint_terms(self, constraint: str) -> frozenset[str]:
+        cached = self._constraint_terms_cache.get(constraint)
+        if cached is None:
+            cached = frozenset(_terms(constraint))
+            self._constraint_terms_cache[constraint] = cached
+        return cached
+
     def _compatibility_features(
         self,
         parent_asin: str,
@@ -428,11 +473,8 @@ class Agent:
         constraints: list[str],
         query_text: str,
     ) -> tuple[float, ...]:
-        title, categories, features, details, store, description, price = self._product_views[parent_asin]
-        field_texts = (title, categories, features, details, store, description)
-        field_terms = [set(_terms(text)) for text in field_texts]
-        combined = " ".join(field_texts)
-        combined_terms = set().union(*field_terms)
+        price = self._product_views[parent_asin][6]
+        field_terms, combined_terms, combined_token_string = self._product_profile(parent_asin)
         query_set = set(query_terms)
         denominator = max(1, len(query_set))
 
@@ -445,12 +487,12 @@ class Agent:
         constraint_coverages: list[float] = []
         exact_phrases = 0
         for constraint in constraints:
-            terms = set(_terms(constraint))
+            terms = self._constraint_terms(constraint)
             if not terms:
                 continue
             constraint_coverages.append(len(terms & combined_terms) / len(terms))
             normalized = " ".join(_terms(constraint))
-            if normalized and normalized in " ".join(_terms(combined)):
+            if normalized and normalized in combined_token_string:
                 exact_phrases += 1
         constraint_coverage = (
             sum(constraint_coverages) / len(constraint_coverages)
@@ -541,12 +583,14 @@ class Agent:
         state: dict[str, object],
         query_terms: list[str],
         top_k: int,
+        tier_counts: dict[str, int] | None = None,
     ) -> list[str]:
         messages = state["messages"]
         query_text = " ".join(str(item) for item in messages) if isinstance(messages, list) else ""
         constraints = self._constraint_phrases(messages)
         structured_weight = 0.10 if state["exploratory"] else 0.15
-        scored: list[tuple[float, int, str]] = []
+        counts = tier_counts or {}
+        scored: list[tuple[int, float, int, str]] = []
         for rank, parent_asin in enumerate(candidates, start=1):
             features = self._feature_vector(
                 parent_asin,
@@ -567,9 +611,11 @@ class Agent:
                     weight * value
                     for weight, value in zip(self._reranker_weights, features, strict=True)
                 )
-            scored.append((final_score, rank, parent_asin))
-        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-        return [parent_asin for _, _, parent_asin in scored[:top_k]]
+            scored.append((counts.get(parent_asin, 0), final_score, rank, parent_asin))
+        # Dominance tiers: satisfying more exact constraints always outranks
+        # satisfying fewer.  The learned score orders products within one tier.
+        scored.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
+        return [parent_asin for _, _, _, parent_asin in scored[:top_k]]
 
     def respond(
         self,
@@ -610,23 +656,44 @@ class Agent:
             popularity_weight=0.0 if state["exploratory"] else 1.0,
         )
         constraints = self._constraint_phrases(state["messages"])
-        exact_candidates = self._exact_evidence_candidates(constraints)
-        if exact_candidates:
-            exact_set = set(exact_candidates)
-            candidates = (
-                exact_candidates
-                + [candidate for candidate in candidates if candidate not in exact_set]
-            )[:self._rerank_candidate_limit]
-        state["last_candidates"] = candidates
-        state["last_query_terms"] = unique_terms
-        ranked = self._rerank(candidates, state, unique_terms, len(candidates))
+        exact_candidates, tier_counts = self._exact_evidence_pool(constraints)
         signature = tuple(unique_terms)
         shown = state["shown"]
-        if (
+        rotating = (
             self._use_coverage_rotation
             and state["last_signature"] == signature
             and isinstance(shown, set)
-        ):
+        )
+        if exact_candidates:
+            if tier_counts and rotating:
+                # Rotation pages the entire top dominance tier: keep every
+                # tier member so unseen ones surface across turns.
+                exact_set = set(exact_candidates)
+                candidates = exact_candidates + [
+                    candidate for candidate in candidates if candidate not in exact_set
+                ]
+            else:
+                # Fresh-disclosure turns keep the precision slice and free
+                # learned reranking until the reranker is retrained within
+                # tiers; dominance ordering then applies on rotation turns.
+                lane = (
+                    exact_candidates[:self._exact_precision_limit]
+                    if tier_counts else exact_candidates
+                )
+                lane_set = set(lane)
+                candidates = (lane + [
+                    candidate for candidate in candidates if candidate not in lane_set
+                ])[:self._rerank_candidate_limit]
+                tier_counts = {}
+        state["last_candidates"] = candidates
+        state["last_query_terms"] = unique_terms
+        ranked = self._rerank(
+            candidates, state, unique_terms, len(candidates), tier_counts
+        )
+        if rotating:
+            # A no-new-constraint reply means the previous page was wrong, so
+            # page onward: show the next unseen products in tiered rank order
+            # and never reintroduce shown products while unseen ones remain.
             head = ranked[:self._coverage_head]
             selected = head + [
                 parent_asin for parent_asin in ranked[self._coverage_head:]

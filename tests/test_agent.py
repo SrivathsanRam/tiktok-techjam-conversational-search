@@ -108,6 +108,102 @@ class AgentStateTest(unittest.TestCase):
             second["recommendations"][0]["parent_asin"],
         )
 
+    def test_boundary_reply_triggers_rotation(self) -> None:
+        first = self.agent.respond(
+            "session", "I'm looking for accessories belts, but I'm still exploring.", 1, 1
+        )
+        second = self.agent.respond(
+            "session",
+            "I don't have a preference for other; please use your judgment.",
+            2,
+            1,
+        )
+        self.assertEqual(len(self.agent._sessions["session"]["messages"]), 1)
+        self.assertNotEqual(
+            first["recommendations"][0]["parent_asin"],
+            second["recommendations"][0]["parent_asin"],
+        )
+
+    def test_invalid_question_reply_triggers_rotation(self) -> None:
+        first = self.agent.respond(
+            "session", "I'm looking for accessories belts, but I'm still exploring.", 1, 1
+        )
+        second = self.agent.respond(
+            "session",
+            "Those options are not quite right yet. Ask me about one specific attribute.",
+            2,
+            1,
+        )
+        self.assertEqual(len(self.agent._sessions["session"]["messages"]), 1)
+        self.assertNotEqual(
+            first["recommendations"][0]["parent_asin"],
+            second["recommendations"][0]["parent_asin"],
+        )
+
+
+class DominanceTierRotationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        catalog_path = Path(self.temporary_directory.name) / "catalog.jsonl"
+        products = [
+            {
+                "parent_asin": f"P{index}",
+                "title": f"Imported leather belt {index}",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Imported"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Everyday belt"],
+                "rating_number": 100 - index,
+            }
+            for index in range(4)
+        ]
+        products.append(
+            {
+                "parent_asin": "Z0",
+                "title": "Domestic canvas belt",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Canvas fabric"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Casual belt"],
+                "rating_number": 500,
+            }
+        )
+        catalog_path.write_text(
+            "".join(json.dumps(product) + "\n" for product in products),
+            encoding="utf-8",
+        )
+        self.agent = Agent(catalog_path)
+        self.agent.reset("session", {})
+
+    def tearDown(self) -> None:
+        self.agent.connection.close()
+        self.temporary_directory.cleanup()
+
+    def test_rotation_pages_unseen_tier_members_before_reintroducing(self) -> None:
+        first = self.agent.respond(
+            "session", "I'm looking for belts. A key requirement is: Imported.", 1, 2
+        )
+        shown_first = {item["parent_asin"] for item in first["recommendations"]}
+        second = self.agent.respond(
+            "session", "I don't have an additional preference for other.", 2, 2
+        )
+        shown_second = {item["parent_asin"] for item in second["recommendations"]}
+        self.assertFalse(shown_first & shown_second)
+        self.assertTrue(shown_second <= {"P0", "P1", "P2", "P3"})
+
+    def test_rotation_ranks_satisfied_tier_above_unsatisfied(self) -> None:
+        self.agent.respond(
+            "session", "I'm looking for belts. A key requirement is: Imported.", 1, 1
+        )
+        second = self.agent.respond(
+            "session", "I don't have an additional preference for other.", 2, 3
+        )
+        ranked = [item["parent_asin"] for item in second["recommendations"]]
+        # Every unseen Imported tier member outranks the popular non-member.
+        self.assertNotIn("Z0", ranked)
+
 
 if __name__ == "__main__":
     unittest.main()
