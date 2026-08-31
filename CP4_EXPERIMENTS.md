@@ -30,6 +30,54 @@ the CP3 selected configuration at TechnicalScore `0.932620`.
 | 4.3 | Selected routes | Synthetic dev 1000 | 1.0000 | 0.766978 | 2.016 | 0.909773 | Keep: +0.004402 over row 3.5 |
 | 4.4 | Selected routes | Hard cases 500 | 0.9060 | 0.543895 | 3.578 | 0.764609 | Keep: +0.007021 over row 3.6 |
 
+| 5.1 | Broadened constraint markers including "looking for" | Public 200 | 1.0000 | 0.815938 | 2.060 | 0.923581 | Revert: "looking for" turned every opener's category into constraints |
+| 5.2 | + drop "looking for"/"prioritize", cut marker remainder at sentence break | Public 200 | 0.9950 | 0.793300 | 2.105 | 0.913390 | Revert: still polluted |
+| 5.3 | + require informative n-gram tokens, never mine the turn-1 intent clause | Public 200 | 0.9900 | 0.811710 | 1.995 | 0.918613 | Revert: `"I'm"` was matching the indexed size value `m` |
+| 5.4 | + verbatim-value check before comma splitting (`Pvc,Resin`), longest-only repair | Public 200 | 1.0000 | 0.829073 | 1.930 | 0.930122 | Revert: truncated 180-char values still fragmented |
+| 5.5 | + accept a wide-delimiter split only when every part is indexed | Public 200 | 1.0000 | 0.833198 | 1.905 | 0.931859 | Revert: marker-phrase repair still cost 8 sessions |
+| 5.6 | **Task 5 final: drop marker-phrase repair; fallback applies only when no marker is present (as specified)** | Public 200 | 1.0000 | 0.856365 | 1.885 | **0.939210** | **Keep: identical on all 200 sessions to row 4.1, so robustness is free** |
+| 5.7 | Selected robustness | Synthetic dev 1000 | 1.0000 | 0.766978 | 2.018 | 0.909733 | Keep (−0.000040 vs row 4.3, noise) |
+| 5.8 | Selected robustness | Hard cases 500 | 0.9040 | 0.536645 | 3.582 | 0.761354 | Keep (−0.003255 vs row 4.4; diagnostic set, official metric unchanged) |
+| 5.9 | Paraphrase harness, pre-Task-5 agent (row 4.1 code) | Public 200 paraphrased | 0.9850 | 0.616435 | 2.230 | 0.852830 | Reference: gap 0.086380 |
+| 5.10 | **Paraphrase harness, Task 5 agent** | Public 200 paraphrased | 0.9800 | 0.723062 | 2.195 | **0.883018** | **Gap 0.056192 < 0.1 target; paraphrased MRR +0.106627** |
+
+## Task 5 notes
+
+Report: `data/releases/cp4/paraphrase_report.json`; harness:
+`tests/paraphrase_harness.py` (clearly marked UNOFFICIAL, not collected by
+`unittest discover` because the filename is not `test_*`). It reproduces the
+official clean score exactly (0.939210), which validates the loop copy, then
+rewrites markers, framing, delimiters, and browsing/override/no-preference
+wording while keeping every catalog-derived value verbatim.
+
+### CP3_STATE.md section 7 checklist coverage
+
+| # | Section 7 wording dependency | CP4 treatment |
+|---:|---|---|
+| 1 | Constraint template markers | `CONSTRAINT_MARKERS` widened to 15 introductions; when none matches, `_ngram_constraints()` matches longest-first non-overlapping token n-grams (max 8 tokens) against the exact-evidence index. Nothing matches → no constraints → sparse retrieval only. |
+| 2 | Semicolon delimiter | `;` still splits (public behaviour). Otherwise the whole remainder is tried as one verbatim value first (fixes `Pvc,Resin`), and a `,`/`and`/`\|` split is accepted only when **every** part is an indexed value, so truncated prose values stay whole. |
+| 3 | Browsing language | `EXPLORATORY_RE` covers 16 browsing paraphrases (just looking, window shopping, undecided, no rush, shopping around, open to ideas, …). |
+| 4 | Override language | `OVERRIDE_RE` covers 18 markers (scratch that, changed my mind, never mind, on second thought, disregard, switch to, no longer, …). |
+| 5 | Override constraint marker | Closed: an override message with no recognized marker now reaches the n-gram fallback, so the replacement value enters the exact lane. Unit test `test_override_without_the_official_marker_still_parses_constraints`. |
+| 6 | Initial sentence boundary | `_base_intent()` cuts at `[.!?;]` or `, but/though/although`, not only `.`. |
+| 7 | No-preference language | `NO_PREFERENCE_RE` replaces the four literals with 18 alternatives (no strong preference, doesn't matter, up to you, your call, I'm easy, anything is fine, …). |
+| 8 | Boundary template | Same regex; boundary paraphrases are recognized and still trigger rotation (`test_boundary_reply_triggers_rotation`). |
+| 9 | "Options are wrong" template | `NEGATIVE_RE` covers 10 rejection phrasings; recognized rejections disclose nothing and keep the signature stable so rotation fires. |
+| 10 | Fixed framing stopwords | Framing words can no longer break retrieval: tokens with catalog document frequency 0 are dropped from every FTS expression (previously one unknown word emptied the conjunctive route), and constraint extraction is index-gated rather than stopword-gated. |
+| 11 | Verbatim catalog values | Partly mitigated: the n-gram fallback recovers a catalog value embedded in surrounding paraphrase. A value whose own tokens are altered still has no posting — an accepted limitation of exact-match evidence, documented in the README. |
+| 12 | Budget language | `BUDGET_MAX_RE` / `BUDGET_AROUND_RE` / `BUDGET_OR_LESS_RE` add no more than, at most, less than, cheaper than, within, max of, `$N or less`, about, roughly, approximately, near. |
+| 13 | Structured `other` replies | Addressed in Task 6b: the question policy now chooses the attribute with the largest expected top-tier reduction instead of always returning `other`. |
+
+### Slot store (5b)
+
+`_resolve_slots()` returns active values, erased values, and a write/erase
+log (stored on the session as `slot_log`). A newly disclosed value supersedes
+a stored one only when they are genuinely contradictory: same single-valued
+slot (material, color, budget) **and** disjoint value vocabularies. So
+`leather` erases `cotton`, while `cotton` and `Solid colors: 100% Cotton; …`
+coexist — the complementary case that makes public_0020 findable. Tokens
+contributed only by an erased value are removed from the lexical query.
+
 ## Task 4 notes
 
 - `_fused_search()` replaces the single concatenated-bag conjunctive query

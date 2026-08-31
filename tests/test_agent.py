@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from starter.agent import Agent, RERANK_FEATURE_NAMES
+from starter.agent import Agent, RERANK_FEATURE_NAMES, _normalized_value
 
 
 class AgentStateTest(unittest.TestCase):
@@ -138,6 +138,154 @@ class AgentStateTest(unittest.TestCase):
         self.assertNotEqual(
             first["recommendations"][0]["parent_asin"],
             second["recommendations"][0]["parent_asin"],
+        )
+
+
+class ParaphraseRobustnessTest(unittest.TestCase):
+    """One test per wording dependency listed in CP3_STATE.md section 7."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        catalog_path = Path(self.temporary_directory.name) / "catalog.jsonl"
+        products = [
+            {
+                "parent_asin": "A",
+                "title": "Black leather belt",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Full grain leather", "100% Leather", "Buckle closure; Imported"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Everyday belt"],
+                "price": 40.0,
+            },
+            {
+                "parent_asin": "B",
+                "title": "Blue cotton belt",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Woven cotton", "100% Cotton", "Buckle closure"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Casual belt"],
+                "price": 20.0,
+            },
+        ]
+        catalog_path.write_text(
+            "".join(json.dumps(product) + "\n" for product in products),
+            encoding="utf-8",
+        )
+        self.agent = Agent(catalog_path)
+        self.agent.reset("session", {})
+
+    def tearDown(self) -> None:
+        self.agent.connection.close()
+        self.temporary_directory.cleanup()
+
+    def test_unmarked_message_recovers_values_from_the_index(self) -> None:
+        # No template marker: n-grams are matched against the exact index and
+        # returned in their normalized token form.
+        self.assertEqual(
+            self.agent._message_constraints("I really need 100% leather here"),
+            ["100 leather"],
+        )
+
+    def test_unmatched_message_yields_no_constraints(self) -> None:
+        self.assertEqual(
+            self.agent._message_constraints("something entirely unrelated please"),
+            [],
+        )
+
+    def test_override_without_the_official_marker_still_parses_constraints(self) -> None:
+        self.agent.respond("session", "I'm looking for belts. Prefer cotton.", 1, 10)
+        self.agent.respond(
+            "session", "Scratch that, I changed my mind. It must have 100% leather.", 2, 10
+        )
+        constraints = self.agent._constraint_phrases(
+            self.agent._sessions["session"]["messages"]
+        )
+        self.assertIn(
+            "100 leather", [_normalized_value(value) for value in constraints]
+        )
+
+    def test_paraphrased_override_rebuilds_state(self) -> None:
+        self.assertTrue(self.agent._is_override("On second thought, disregard that."))
+        self.assertTrue(self.agent._is_override("Never mind my earlier note."))
+        self.assertFalse(self.agent._is_override("For that, what matters is: leather."))
+
+    def test_paraphrased_browsing_is_exploratory(self) -> None:
+        for message in (
+            "Browsing belts for now, nothing decided.",
+            "Checking out belts — just looking at the moment.",
+            "Belts please, though I'm undecided so far.",
+        ):
+            self.assertTrue(self.agent._is_exploratory(message), message)
+
+    def test_paraphrased_no_preference_and_rejection_disclose_nothing(self) -> None:
+        for message in (
+            "No strong preference on color, honestly.",
+            "color doesn't matter to me.",
+            "I'm easy about color — anything is fine.",
+            "Whatever you think is best for color.",
+            "Up to you regarding color.",
+            "None of those work for me.",
+            "These aren't right — try again.",
+            "That's off the mark.",
+        ):
+            self.assertFalse(self.agent._has_preference(message), message)
+
+    def test_disclosure_paraphrases_are_still_preference_bearing(self) -> None:
+        for message in (
+            "I care about 100% leather.",
+            "It must have buckle closure and imported.",
+        ):
+            self.assertTrue(self.agent._has_preference(message), message)
+
+    def test_semantic_override_erases_contradicting_slot(self) -> None:
+        _, erased, log = self.agent._resolve_slots([
+            "I'm looking for belts. What I need is: cotton.",
+            "I care about leather.",
+        ])
+        self.assertEqual(erased, ["cotton"])
+        self.assertTrue(
+            any(entry["action"] == "erase" and entry["value"] == "cotton" for entry in log)
+        )
+
+    def test_complementary_same_type_values_are_retained(self) -> None:
+        active, erased, _ = self.agent._resolve_slots([
+            "I'm looking for belts. What I need is: cotton.",
+            "For that, what matters is: 100% cotton.",
+        ])
+        self.assertEqual(erased, [])
+        self.assertEqual(active, ["cotton", "100% cotton"])
+
+    def test_alternate_delimiters_split_only_when_every_part_is_indexed(self) -> None:
+        self.assertEqual(
+            self.agent._marker_phrases("what i need is: buckle closure and imported"),
+            ["buckle closure", "imported"],
+        )
+        whole = "a long prose value that is not indexed, with a comma"
+        self.assertEqual(
+            self.agent._marker_phrases(f"what i need is: {whole}"), [whole]
+        )
+
+    def test_base_intent_accepts_other_sentence_boundaries(self) -> None:
+        self.assertEqual(self.agent._base_intent("I want belts! Prefer cotton"), "I want belts")
+        self.assertEqual(self.agent._base_intent("I want belts; prefer cotton"), "I want belts")
+        self.assertEqual(
+            self.agent._base_intent("I want belts, but I'm still exploring"), "I want belts"
+        )
+
+    def test_budget_paraphrases_are_scored(self) -> None:
+        for text in ("no more than $100", "at most $100", "$100 or less", "within $100"):
+            self.assertEqual(self.agent._budget_score(text, 90.0), 1.0, text)
+            self.assertEqual(self.agent._budget_score(text, 120.0), -1.0, text)
+        self.assertGreater(self.agent._budget_score("roughly $100", 100.0), 0.9)
+        self.assertGreater(self.agent._budget_score("about $100", 100.0), 0.9)
+
+    def test_unrecognized_framing_never_enters_the_exact_lane(self) -> None:
+        # Framing words are not catalog values, so no posting list exists.
+        self.assertEqual(
+            self.agent._message_constraints("could you kindly show me something nice"),
+            [],
         )
 
 

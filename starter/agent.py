@@ -51,6 +51,85 @@ STOPWORDS = {
     "right", "specific", "still", "those", "use", "what", "yet", "don", "have", "other",
 }
 
+# Constraint introductions.  The three public templates are listed first so
+# their exact wording keeps its verbatim delimiter-splitting behaviour; the
+# rest let a paraphrased introduction reach the same code path.
+CONSTRAINT_MARKERS = (
+    "key requirement is:",
+    "what matters is:",
+    "what i need is:",
+    "key requirement is",
+    "what matters is",
+    "what i need is",
+    "requirement is",
+    "i need",
+    "i want",
+    "i require",
+    "must have",
+    "needs to be",
+    "has to be",
+    "should be",
+    "important is",
+    "matters most is",
+)
+# A real sentence break, never the decimal point inside a price.
+SENTENCE_BREAK_RE = re.compile(r"[.!?](?=\s|$)")
+# Any of these split a disclosed list into separate constraint values.
+CONSTRAINT_DELIMITERS = re.compile(r"[;|]|,\s+and\s+|\s+and\s+|,")
+NO_PREFERENCE_RE = re.compile(
+    r"(?:do(?:n'?t| not)\s+(?:really\s+)?(?:have|mind|care)"
+    r"|have\s+no\b|no\s+(?:strong\s+|particular\s+|specific\s+)?preference"
+    r"|not\s+fussed|no\s+opinion|either\s+(?:one\s+)?is\s+fine|either\s+works"
+    r"|up\s+to\s+you|your\s+(?:judgment|judgement|call|choice)|you\s+(?:decide|choose|pick)"
+    r"|does(?:n'?t| not)\s+matter|no\s+real\s+view|i'?m\s+(?:easy|flexible|open)"
+    r"|open\s+to\s+(?:anything|whatever|any)|whatever\s+you|surprise\s+me"
+    r"|anything\s+(?:is\s+)?(?:fine|works)|no\s+additional)",
+    re.I,
+)
+NEGATIVE_RE = re.compile(
+    r"(?:not\s+quite\s+right|none\s+of\s+(?:these|those|them)"
+    r"|not\s+(?:really\s+)?what\s+i|(?:aren'?t|are\s+not|isn'?t|is\s+not)\s+(?:really\s+)?"
+    r"(?:what|right|it|working|close)|off\s+(?:the\s+)?(?:mark|base)|miss(?:ing|es)?\s+the\s+mark"
+    r"|wrong\s+(?:results|options|items|products)|(?:these|those)\s+don'?t\s+work"
+    r"|try\s+again|nothing\s+here\s+works)",
+    re.I,
+)
+EXPLORATORY_RE = re.compile(
+    r"(?:still\s+exploring|just\s+browsing|not\s+sure\s+yet|just\s+looking"
+    r"|looking\s+around|window\s+shopping|browsing|exploring|undecided"
+    r"|haven'?t\s+decided|have\s+not\s+decided|no\s+rush|in\s+no\s+hurry"
+    r"|open\s+to\s+(?:ideas|options|suggestions)|getting\s+ideas"
+    r"|see\s+what'?s\s+(?:out\s+there|available)|shopping\s+around"
+    r"|not\s+sure\s+what)",
+    re.I,
+)
+OVERRIDE_RE = re.compile(
+    r"(?:actually|instead\s+of|forget\s|ignore\s+my\s+earlier|ignore\s+(?:that|what)"
+    r"|changed?\s+my\s+mind|change\s+of\s+plan|scratch\s+that|never\s+mind"
+    r"|nevermind|rather\s+than|on\s+second\s+thought|second\s+thoughts"
+    r"|switch\s+to|make\s+that|no\s+longer|disregard|scrap\s+that"
+    r"|let'?s\s+go\s+with\s+instead|i\s+changed)",
+    re.I,
+)
+# Sentence boundary for the opening intent: any terminator, or the clause
+# separator the browsing template uses.
+BASE_INTENT_RE = re.compile(r"[.!?;]|,\s+(?:but|though|although)\s")
+BUDGET_AROUND_RE = re.compile(
+    r"(?:budget\s+(?:is\s+|of\s+)?around|around|about|roughly|approximately|near|~)"
+    r"\s*\$?([0-9]+(?:\.[0-9]+)?)",
+    re.I,
+)
+BUDGET_MAX_RE = re.compile(
+    r"(?:under|below|up\s+to|<=|less\s+than|no\s+more\s+than|at\s+most|cheaper\s+than"
+    r"|max(?:imum)?(?:\s+of)?|within|keep\s+it\s+(?:under|below))\s*\$?([0-9]+(?:\.[0-9]+)?)",
+    re.I,
+)
+BUDGET_OR_LESS_RE = re.compile(r"\$?([0-9]+(?:\.[0-9]+)?)\s*(?:or\s+less|or\s+under)", re.I)
+# Single-valued slots: a newly disclosed value of one of these types replaces
+# the stored value rather than accumulating beside it.
+SINGLE_VALUED_SLOTS = frozenset({"material", "color", "budget"})
+MAX_FALLBACK_NGRAM = 8
+
 
 def _text(value: object) -> str:
     if value is None:
@@ -124,6 +203,7 @@ class Agent:
             str, tuple[tuple[frozenset[str], ...], frozenset[str], str]
         ] = {}
         self._constraint_terms_cache: dict[str, frozenset[str]] = {}
+        self._message_constraint_cache: dict[tuple[str, bool], list[str]] = {}
         self._coarse_category_views: dict[str, tuple[str, frozenset[str]]] = {}
         self._requested_category_cache: dict[str, tuple[str, frozenset[str]]] = {}
         self._budget_disclosed_cache: dict[str, bool] = {}
@@ -273,32 +353,28 @@ class Agent:
             "user_profile": user_profile,
             "shown": set(),
             "last_signature": None,
+            "slot_log": [],
         }
 
     @staticmethod
     def _is_override(message: str) -> bool:
-        lowered = message.lower()
-        return any(marker in lowered for marker in ("actually", "instead of", "forget ", "ignore my earlier"))
+        return bool(OVERRIDE_RE.search(message))
+
+    @staticmethod
+    def _is_exploratory(message: str) -> bool:
+        return bool(EXPLORATORY_RE.search(message))
 
     @staticmethod
     def _has_preference(message: str) -> bool:
-        lowered = message.lower()
-        return not any(
-            marker in lowered
-            for marker in (
-                "don't have a preference",
-                "don't have an additional preference",
-                "do not have a preference",
-                "do not have an additional preference",
-                "not quite right",
-            )
-        )
+        """False for replies that disclose nothing: no-preference and rejections."""
+        return not (NO_PREFERENCE_RE.search(message) or NEGATIVE_RE.search(message))
 
     @staticmethod
     def _base_intent(message: str) -> str:
         # The initial category precedes the first sentence boundary.  Keeping only
         # that clause prevents an Intent Override from retaining the stale value.
-        return message.split(".", 1)[0]
+        match = BASE_INTENT_RE.search(message)
+        return message[:match.start()] if match else message
 
     def _ranked_asins(self, expression: str, limit: int = 150) -> list[str]:
         if not expression:
@@ -321,13 +397,20 @@ class Agent:
     ) -> list[str]:
         if not terms:
             return []
+        # A token absent from the catalog cannot match anything, and inside a
+        # conjunctive route it empties the whole route.  Unrecognized framing
+        # words are therefore dropped before any expression is built.
+        terms = [term for term in terms if self._token_df.get(term, 0) > 0] or terms
         quoted = [f'"{term}"' for term in terms]
         # Per-constraint routes: each disclosed requirement retrieves on its
         # own, so one over-constrained bag can no longer empty the precision
         # lanes.  Generic tokens are recognized by catalog document frequency
         # rather than a hardcoded list.
         generic_df = self._generic_token_df
-        category_terms = _terms(category_phrase)
+        category_terms = [
+            term for term in _terms(category_phrase)
+            if self._token_df.get(term, 0) > 0
+        ]
         materials = [term for term in terms if term in MATERIAL_TERMS]
         colors = [term for term in terms if term in COLOR_TERMS]
         expressions: list[tuple[str, float]] = []
@@ -386,29 +469,168 @@ class Agent:
         ordered = sorted(scores, key=lambda asin: (-scores[asin], best_route_rank[asin], asin))
         return ordered[:top_k]
 
-    @staticmethod
-    def _constraint_phrases(messages: object) -> list[str]:
-        if not isinstance(messages, list):
+    def _marker_phrases(self, message: str) -> list[str] | None:
+        """Values after a recognized introduction, or None if none is present."""
+        lowered = str(message).lower()
+        for marker in CONSTRAINT_MARKERS:
+            index = lowered.find(marker)
+            if index < 0:
+                continue
+            remainder = lowered[index + len(marker):]
+            # A disclosure ends at its own sentence; anything after belongs to
+            # a different statement.
+            break_match = SENTENCE_BREAK_RE.search(remainder)
+            if break_match:
+                remainder = remainder[:break_match.start()]
+            remainder = remainder.strip(" .;,-")
+            if not remainder:
+                return []
+            if ";" in remainder:
+                # The public list delimiter.
+                phrases = [part.strip(" .;,-") for part in remainder.split(";")]
+                return [phrase for phrase in phrases if phrase]
+            if self._evidence_postings(remainder):
+                # One verbatim catalog value that happens to contain a
+                # delimiter character, such as "Pvc,Resin".
+                return [remainder]
+            # Other delimiters are ambiguous: catalog values contain commas
+            # and the word "and".  Accept such a split only when every part is
+            # itself an indexed value, so a paraphrased list is separated
+            # while a long prose value stays whole.
+            parts = [
+                part.strip(" .;,-") for part in CONSTRAINT_DELIMITERS.split(remainder)
+            ]
+            parts = [part for part in parts if part]
+            if len(parts) > 1 and all(self._evidence_postings(part) for part in parts):
+                return parts
+            return [remainder]
+        return None
+
+    def _ngram_constraints(self, text: str) -> list[str]:
+        """Longest-first, non-overlapping token n-grams present in the index.
+
+        This is the paraphrase fallback: it recovers catalog-derived values
+        that arrive without a recognized introduction, and it can only ever
+        return strings that the exact-evidence index already contains, so
+        unrecognized framing cannot enter the exact lane.
+        """
+        tokens = [token.lower() for token in TOKEN_RE.findall(text)]
+        if not tokens or not self._use_exact_evidence:
             return []
-        phrases: list[str] = []
-        markers = (
-            "key requirement is:",
-            "what matters is:",
-            "what i need is:",
-        )
-        for message in messages:
-            lowered = str(message).lower()
-            for marker in markers:
-                if marker not in lowered:
+        used = [False] * len(tokens)
+        found: list[tuple[int, str]] = []
+        for size in range(min(MAX_FALLBACK_NGRAM, len(tokens)), 0, -1):
+            for start in range(len(tokens) - size + 1):
+                if any(used[start:start + size]):
                     continue
-                remainder = lowered.split(marker, 1)[1]
-                phrases.extend(
-                    phrase.strip(" .;,-")
-                    for phrase in remainder.split(";")
-                    if phrase.strip(" .;,-")
-                )
-                break
-        return list(dict.fromkeys(phrases))
+                gram = tokens[start:start + size]
+                phrase = " ".join(gram)
+                if not _terms(phrase):
+                    # Pure stopwords or single letters: "i'm" must never match
+                    # the indexed size value "m".
+                    continue
+                if size == 1 and self._token_df.get(gram[0], 0) > self._generic_token_df:
+                    # A lone catalog-wide token is framing noise, not evidence.
+                    continue
+                if not self._evidence_postings(phrase):
+                    continue
+                for index in range(start, start + size):
+                    used[index] = True
+                found.append((start, phrase))
+        return [phrase for _, phrase in sorted(found)]
+
+    def _message_constraints(self, message: str, is_opening: bool = False) -> list[str]:
+        cache_key = (message, is_opening)
+        cached = self._message_constraint_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if is_opening:
+            # The opening clause names the category, which the category routes
+            # and coarse-category features already handle.  Only what follows
+            # it is a disclosure.
+            message = message[len(self._base_intent(message)):]
+        phrases = self._marker_phrases(message)
+        if phrases is None:
+            # No recognized introduction: recover disclosed values from the
+            # index.  An introduced value is trusted as written, because the
+            # simulator truncates long catalog strings and mining fragments
+            # out of a truncated value only adds weak evidence.
+            values = self._ngram_constraints(message)
+        else:
+            values = list(phrases)
+        values = list(dict.fromkeys(values))
+        self._message_constraint_cache[cache_key] = values
+        return values
+
+    @staticmethod
+    def _constraint_type(value: str) -> str:
+        """Slot type for a disclosed value, mirroring the simulator's attributes."""
+        lowered = value.lower()
+        if "budget" in lowered or re.search(r"(?:\$|<=|under)\s*\d", lowered):
+            return "budget"
+        terms = set(_terms(lowered))
+        if terms & MATERIAL_TERMS:
+            return "material"
+        if terms & COLOR_TERMS or "color" in lowered:
+            return "color"
+        if any(word in lowered for word in ("size", "sizing", "width", "wide", "narrow")):
+            return "size"
+        if any(word in lowered for word in ("department", "style", "fit", "sleeve", "neck")):
+            return "style"
+        if any(word in lowered for word in ("hiking", "running", "gym", "winter", "outdoor", "work")):
+            return "use_case"
+        return "feature"
+
+    @staticmethod
+    def _contradicts(slot: str, stored: str, disclosed: str) -> bool:
+        """True when a newly disclosed value cannot hold beside a stored one.
+
+        Same-type values are usually complementary (``cotton`` and a full
+        fabric-composition string describe one product), so only disjoint
+        vocabularies count as a contradiction.
+        """
+        if slot == "budget":
+            return _normalized_value(stored) != _normalized_value(disclosed)
+        vocabulary = MATERIAL_TERMS if slot == "material" else COLOR_TERMS
+        stored_terms = vocabulary & set(_terms(stored))
+        disclosed_terms = vocabulary & set(_terms(disclosed))
+        if not stored_terms or not disclosed_terms:
+            return False
+        return stored_terms.isdisjoint(disclosed_terms)
+
+    def _resolve_slots(self, messages: object) -> tuple[list[str], list[str], list[dict]]:
+        """Slot store: active values, erased values, and the write/erase log."""
+        if not isinstance(messages, list):
+            return [], [], []
+        records: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for index, message in enumerate(messages):
+            for value in self._message_constraints(str(message), is_opening=index == 0):
+                normalized = _normalized_value(value)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                records.append((value, self._constraint_type(value)))
+        stored: dict[str, list[str]] = {}
+        erased: set[str] = set()
+        log: list[dict] = []
+        for value, slot in records:
+            if slot in SINGLE_VALUED_SLOTS:
+                for previous in list(stored.get(slot, ())):
+                    if self._contradicts(slot, previous, value):
+                        stored[slot].remove(previous)
+                        erased.add(previous)
+                        log.append({
+                            "action": "erase", "slot": slot,
+                            "value": previous, "superseded_by": value,
+                        })
+            stored.setdefault(slot, []).append(value)
+            log.append({"action": "write", "slot": slot, "value": value})
+        active = [value for value, _ in records if value not in erased]
+        return active, sorted(erased), log
+
+    def _constraint_phrases(self, messages: object) -> list[str]:
+        return self._resolve_slots(messages)[0]
 
     def _evidence_postings(self, phrase: str) -> tuple[str, ...]:
         normalized = _normalized_value(phrase)
@@ -535,8 +757,9 @@ class Agent:
         cached = self._budget_disclosed_cache.get(query_text)
         if cached is None:
             cached = bool(
-                re.search(r"budget\s+around\s+\$?[0-9]", query_text, re.I)
-                or re.search(r"(?:under|below|up to|<=)\s*\$?[0-9]", query_text, re.I)
+                BUDGET_AROUND_RE.search(query_text)
+                or BUDGET_MAX_RE.search(query_text)
+                or BUDGET_OR_LESS_RE.search(query_text)
             )
             self._budget_disclosed_cache[query_text] = cached
         return cached
@@ -545,14 +768,16 @@ class Agent:
     def _budget_score(query_text: str, price: float | None) -> float:
         if price is None:
             return 0.0
-        around = re.search(r"budget\s+around\s+\$?([0-9]+(?:\.[0-9]+)?)", query_text, re.I)
+        # A cap is a harder statement than a target, so it is read first when
+        # a paraphrase happens to contain both readings.
+        maximum = BUDGET_MAX_RE.search(query_text) or BUDGET_OR_LESS_RE.search(query_text)
+        around = BUDGET_AROUND_RE.search(query_text)
+        if maximum and (not around or maximum.start() <= around.start()):
+            return 1.0 if price <= float(maximum.group(1)) else -1.0
         if around:
             target = float(around.group(1))
             scale = max(10.0, target * 0.25)
             return max(0.0, 1.0 - abs(price - target) / scale)
-        maximum = re.search(r"(?:under|below|up to|<=)\s*\$?([0-9]+(?:\.[0-9]+)?)", query_text, re.I)
-        if maximum:
-            return 1.0 if price <= float(maximum.group(1)) else -1.0
         return 0.0
 
     def _product_profile(
@@ -780,11 +1005,7 @@ class Agent:
         state = self._sessions[session_id]
         if turn == 1:
             state["base_message"] = self._base_intent(user_message)
-            lowered = user_message.lower()
-            state["exploratory"] = any(
-                marker in lowered
-                for marker in ("still exploring", "just browsing", "not sure yet")
-            )
+            state["exploratory"] = self._is_exploratory(user_message)
             state["messages"] = [user_message]
         elif self._is_override(user_message):
             messages = state["messages"]
@@ -799,8 +1020,23 @@ class Agent:
                 messages.append(user_message)
 
         query_text = " ".join(str(item) for item in state["messages"])
-        unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
-        constraints = self._constraint_phrases(state["messages"])
+        constraints, erased, slot_log = self._resolve_slots(state["messages"])
+        state["slot_log"] = slot_log
+        unique_terms = list(dict.fromkeys(_terms(query_text)))
+        if erased:
+            # A superseded value must stop steering retrieval, so drop the
+            # tokens it alone contributed.
+            retained = set(_terms(str(state["base_message"])))
+            for value in constraints:
+                retained.update(_terms(value))
+            dropped = {
+                token
+                for value in erased
+                for token in _terms(value)
+                if token not in retained
+            }
+            unique_terms = [term for term in unique_terms if term not in dropped]
+        unique_terms = unique_terms[:80]
         requested_category = self._requested_category(
             str(state.get("base_message") or "")
         )[0]
