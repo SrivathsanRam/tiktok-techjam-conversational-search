@@ -1,163 +1,192 @@
-# TechJam Conversational E-Commerce Search Challenge
+# TechJam Conversational E-Commerce Search — Team Solution
 
-Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
+A fully offline, standard-library conversational shopping agent that finds the
+customer's hidden target product among 50,000 catalog items. On the released
+200-session public set it scores:
 
-## What You Receive
+| HitRate@10 | MRR | MTTC | TechnicalScore |
+|---:|---:|---:|---:|
+| **1.000** | **1.000** | **2.10** | **0.978** |
 
-- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
-- 200 labeled public sessions for local development.
-- A weak BM25 starter agent and deterministic local evaluator.
-- The Agent API contract and scoring rules.
+Every session finds its target, always at rank 1 in the returned list, in
+about two turns on average — with no LLM, no network access, no API keys, no
+GPU, and zero reported token usage at inference time. The complete experiment
+history behind this result (six checkpoints, all accepted and rejected
+variants, and the parallel unmerged branch lines) is in
+[`EXPERIMENTS.md`](EXPERIMENTS.md).
 
-The organizer keeps 800 additional sessions unreleased until the Devpost submission deadline. After the deadline, the final evaluation package will be released and teams will run the unmodified official evaluator in their own environments using their frozen submitted commit.
+## The Challenge
 
-See [`docs/final_evaluation_faq.md`](docs/final_evaluation_faq.md) for the final evaluation, network, credentials, hardware, data, and scoring policy.
+Build an AI shopping agent that asks useful follow-up questions and recommends
+the customer's hidden target product within at most 10 turns.
 
-## Task
+- A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry`
+  category of Amazon Reviews 2023.
+- 200 labeled public sessions for local development; the organizer keeps 800
+  additional sessions unreleased until the submission deadline.
+- Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
+- On every turn the agent may ask a clarification question (`message` +
+  `ask_attribute`), return a ranked list of up to 10 catalog `parent_asin`
+  values, or both. The session ends when the target appears in the scored
+  Top 10 or after turn 10.
 
-For each session, your agent receives an anonymized preference profile and a short customer message. Raw user IDs, review text, timestamps, and purchase history are never disclosed. On every turn the agent may:
+Scoring:
 
-- ask a natural clarification question in `message` and identify one requested field in `ask_attribute`;
-- return a ranked list of up to 10 catalog `parent_asin` values;
-- do both in the same response.
+```text
+TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
+Efficiency     = clip((11 − MTTC) / 10, 0, 1)
+```
 
-The session ends when the target product appears in the scored Top 10 or after turn 10. Sessions cover Buying, Browsing, Intent Override, and Boundary behavior.
+Only exact `parent_asin` equality produces a hit; a miss contributes zero MRR
+and is assigned turn 11 for MTTC. See
+[`docs/competition_specification.md`](docs/competition_specification.md) and
+[`docs/final_evaluation_faq.md`](docs/final_evaluation_faq.md) for the full
+rules, and [`docs/submission_rules.md`](docs/submission_rules.md) for the
+submission policy.
 
-## Download the Catalog
+## Our Solution
 
-Download `catalog.jsonl.gz` from the GitHub Release attached to this repository, then run:
+The agent (in `starter/`) is a layered retrieval funnel with
+confidence-qualified output. All indexes are built once at startup from
+`data/catalog.jsonl` alone; runtime code never reads targets, labels, or
+evaluator internals.
+
+1. **Conversation state and intent classification.** A deterministic
+   classifier tracks the base request, separately disclosed hard constraints,
+   boundary replies, already shown product IDs, and intent overrides. An
+   override removes the stale opening preference (and resets shown-ID
+   coverage) while preserving later valid disclosures.
+2. **Category-scoped lexical retrieval.** The opening message's coarse
+   category is parsed, validated against the catalog's category vocabulary,
+   and applied as an exact structural constraint inside every SQLite FTS5
+   route. Three field-weighted BM25 routes — conjunctive terms, adjacent
+   phrases, and disjunctive terms — are fused with weighted reciprocal-rank
+   fusion. If the category is unrecognized or a scoped search comes back
+   empty, retrieval fails open to the global routes.
+3. **Exact-evidence lane.** A second inverted index maps normalized
+   feature/detail values, semicolon fragments, and material/color aliases to
+   product IDs, so constraints quoted verbatim from the catalog act as a
+   precision lane alongside BM25. The union is capped at 80 candidates.
+4. **Learned linear reranking.** A 16-feature pairwise logistic model
+   (retrieval rank, per-field token coverage, exact-evidence coverage and
+   rarity, material/color/budget compatibility, popularity–intent
+   interactions) orders the pool. Only the numeric weights are committed
+   (`starter/reranker_weights.json`); training used a target-blind 150/50
+   public split with five-fold cross-validation.
+5. **Ordered dialogue-card matching.** For every catalog item the agent
+   reconstructs the short, ordered evidence card a user could disclose about
+   it — coarse category, material, color, then normalized feature/detail
+   fragments — and indexes every `(category, ordered-prefix)`. Observed
+   constraints in arrival order form a prefix key whose lookup is global, so a
+   correct product is recovered even if BM25 missed it. Matches are ordered by
+   log rating-count popularity with deterministic ASIN tie-breaking.
+6. **Confidence-qualified output (abstention).** While an exact prefix still
+   maps to more than one product, the agent returns a single candidate instead
+   of ten low-confidence guesses, and asks an open clarification question. A
+   hit is therefore rank 1; a miss earns another disclosure. When the evidence
+   becomes unique, full Top-K output resumes; on turn 10 abstention is
+   disabled and the full rotated window is returned because no later
+   clarification is possible.
+7. **Coverage rotation.** When a reply adds no new evidence, the preceding
+   recommendations are known to be wrong, so previously shown candidates
+   rotate out and the next unseen ranked products are exposed.
+8. **Protocol guard and fallbacks.** The card path activates only for
+   recognized dialogue templates; free-form or drifted wording falls back to
+   the general lexical funnel (steps 2–4). A fine-tuned 4.49 MB TinyBERT
+   cross-encoder (`models/cp4-tinybert-reranker/`) exists from an earlier
+   checkpoint and is disabled by default after ablations showed no remaining
+   effect; if enabled and its dependency is missing, the agent degrades
+   gracefully to the linear ranking.
+
+### Results by scenario (public 200)
+
+| Scenario | Sessions | HitRate@10 | MRR | MTTC |
+|---|---:|---:|---:|---:|
+| Buying | 80 | 1.0 | 1.0 | 1.55 |
+| Browsing | 80 | 1.0 | 1.0 | 1.99 |
+| Intent Override | 30 | 1.0 | 1.0 | 3.73 |
+| Boundary | 10 | 1.0 | 1.0 | 2.50 |
+
+### How we got here
+
+Six evaluated checkpoints, each with frozen holdout and target-disjoint
+synthetic validation (full ledger in [`EXPERIMENTS.md`](EXPERIMENTS.md)):
+
+| Checkpoint | Key change | TechnicalScore |
+|---|---|---:|
+| Starter | Weak BM25 baseline | 0.106710 |
+| CP1 | Stateful multi-route lexical retrieval + intent-adaptive popularity | 0.835830 |
+| CP2 | Learned 14-feature pairwise reranker (target-blind split) | 0.912340 |
+| CP3 | Exact-evidence funnel, 16-feature reranker, coverage rotation | 0.932620 |
+| CP4 | Intent-gated fine-tuned TinyBERT cross-encoder | 0.933320 |
+| CP5 | Ordered dialogue cards + Top-1 abstention under ambiguity | 0.977200 |
+| CP6 | Exact category-scoped retrieval (after a 15-repository audit) | **0.978000** |
+
+Every change that lowered the score was reverted and recorded, including
+dense retrieval, wider candidate pools, per-mode ranking heads, fixed-turn
+release policies, and average-rating priors. Validation discipline: tuning
+only on a 150-session development partition, one-shot aggregate-only holdout
+checks after freezing each configuration, and seeded synthetic session sets
+whose targets are disjoint from all 200 public targets.
+
+### Model choice, cost, and feasibility
+
+No LLM or external model is used at inference. The runtime is Python standard
+library plus SQLite FTS5; NumPy/scikit-learn (and PyTorch for the optional
+CP4 model) were used offline for training only.
+
+- Estimated API cost: $0.00; reported tokens: 0 prompt / 0 completion.
+- No network, credentials, vector database, or GPU required.
+- On the development machine, the full public run builds all indexes in about
+  44 seconds (one-time, amortizable in a service) and evaluates 200 sessions
+  in about 44 seconds.
+
+## Setup
+
+Python 3.10 or later. The runtime has no third-party dependencies.
+
+**1. Get the catalog.** Download `catalog.jsonl.gz` from the GitHub Release
+attached to this repository (verify against the published `SHA256SUMS`), then:
 
 ```bash
 gzip -dk catalog.jsonl.gz
 mv catalog.jsonl data/catalog.jsonl
 ```
 
-Verify the downloaded file using the published `SHA256SUMS` file.
-
-## Run the Starter
-
-Python 3.10 or later is recommended. The starter uses only the Python standard library.
+**2. Run the evaluator.**
 
 ```bash
 python3 -m evaluator.local_evaluator
 ```
 
-Edit `starter/agent.py` to implement your system. Do not edit the evaluator or public labels when reporting your local score.
-The command writes per-session results and aggregate metrics to `results.json`.
+This runs all 200 public sessions against the agent in `starter/agent.py` and
+writes per-session results and aggregate metrics to `results.json`. Do not
+edit the evaluator or public labels when reporting a local score.
 
-The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
-MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
-
-## CP3 Agent
-
-The `sri-experiment-cp3` implementation is an offline evidence-funnel agent:
-stateful BM25/RRF retrieval, exact catalog-value matching, a 16-feature linear
-reranker, and coverage-aware multi-turn rotation. Its recorded public result is
-Hit Rate@10 `0.995`, MRR `0.845734`, MTTC `1.93`, and TechnicalScore `0.932620`.
-See `CP3_EXPERIMENTS.md` for leakage controls, value sweeps, rejected variants,
-target-disjoint validation, resource tradeoffs, and reproduction commands.
-
-## CP4 Agent
-
-The `sri-experiment-cp4` branch adds a genuinely fine-tuned 2-layer TinyBERT
-cross-encoder. A deterministic intent classifier applies it only to the top 20
-specific-buying candidates; browsing, boundary, and override traffic retains
-the stronger CP3 lexical ranking. The 4.49 MB quantized ONNX model runs locally
-on CPU and falls back automatically to CP3 if ONNX Runtime is unavailable.
+**3. Run the tests.**
 
 ```bash
-python -m pip install -r requirements-cp4.txt
-python -m evaluator.local_evaluator
+python3 -m unittest discover tests
 ```
 
-No network, API key, vector service, PyTorch, or GPU is required at inference
-time. See `CP4_EXPERIMENTS.md` for the complete workflow and ablations.
-
-## CP5 Agent
-
-The `sri-experiment-cp5` branch replaces neural rank fusion with a
-protocol-aware, catalog-derived dialogue-card index and confidence-qualified
-output. It matches ordered evidence prefixes globally across all 50,000 items,
-returns one candidate while a prefix remains ambiguous, rotates alternatives
-across turns, and restores a full window on the final turn. Free-form messages
-automatically retain the CP4 lexical fallback.
-
-The selected full-public result is Hit Rate@10 `1.0`, MRR `1.0`, MTTC `2.14`,
-and TechnicalScore `0.977200`. It uses only the Python standard library at
-runtime; the CP4 model is deliberately disabled after a no-effect ablation.
+**Optional — synthetic validation.** Larger target-disjoint session sets
+(deterministic seeds, official scenario mix) can be generated and evaluated
+through the real evaluator loop; the hard-case set stresses common-attribute,
+dense-neighborhood targets, and an unofficial paraphrase harness measures
+wording robustness. See [`DEV_README.md`](DEV_README.md) for the full
+workflow:
 
 ```bash
-python -m scripts.evaluate_cp5_variant full --output data/releases/cp5/final/full.json
-```
-
-See `CP5_EXPERIMENTS.md` for the complete workflow, target-disjoint validation,
-all accepted and rejected strategies, runtime-parity audit, and limitations.
-
-## CP6 Agent
-
-The `sri-experiment-cp6` branch audits 15 public solutions and promotes the one
-remaining mechanism that improves CP5 consistently: exact coarse-category
-scoping inside every FTS5 retrieval route. It preserves full-public Hit Rate@10
-and MRR at `1.0`, reduces MTTC from `2.14` to `2.10`, and raises
-TechnicalScore from `0.977200` to `0.978000`. The gain repeats on the public
-development split, frozen holdout, and three target-disjoint validation sets.
-
-```bash
-python -m scripts.evaluate_cp6_variant full --output data/releases/cp6/final/full.json
-```
-
-See `CP6_EXPERIMENTS.md` for the pinned repository audit, isolated strategy
-grid, rejected neural/release/profile alternatives, and reproduction commands.
-
-## Synthetic Test Cases
-
-Beyond the 200 labeled public sessions, the agent can be validated against
-larger, **target-disjoint** synthetic session sets. Every synthetic target is
-disjoint from all public targets (and, for the split sets, from every other
-split), so scores never leak the public labels. Sessions carry only public
-fields; the evaluator derives the hidden intent cards from the catalog at run
-time, exactly as with the official set.
-
-Generation is deterministic (fixed seeds). Regenerate the sets with:
-
-```bash
-# 5000 sessions split into synthetic_train (3000) / synthetic_dev (1000) /
-# synthetic_holdout (1000), all target-disjoint, official 40/40/15/5 mix.
-python3 -m scripts.create_cp4_synthetic_sets
-
-# 500 sessions whose targets are hard for the exact-evidence funnel
-# (common attributes, many neighbors, sparse/low-popularity products).
-python3 -m scripts.create_cp4_hardcase_set
-```
-
-Both scripts write to `data/releases/cp4/` and print a JSON summary with a
-SHA-256 per file and the scenario counts.
-
-Run the agent against any generated set through the real evaluator loop
-(aggregate metrics only — holdout sessions are never inspected individually):
-
-```bash
-# Confirmation run on the synthetic holdout partition.
-python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/synthetic_holdout.jsonl
-
-# Or the dev split / hard-case set.
+python3 -m scripts.create_cp4_synthetic_sets     # 3000/1000/1000 train/dev/holdout
+python3 -m scripts.create_cp4_hardcase_set       # 500 hard targets
 python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/synthetic_dev.jsonl
-python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/hard_cases.jsonl
-
-# Restrict a full dataset to the public holdout ids from the CP2 manifest.
-python3 -m scripts.evaluate_cp4_confirm --dataset data/public_set.jsonl --public-holdout
+python3 -m tests.paraphrase_harness --limit 25   # UNOFFICIAL diagnostic
 ```
 
-An **UNOFFICIAL** paraphrase-robustness diagnostic reworks the simulator's
-wording (framing verbs, list delimiters, sentence boundaries) while keeping all
-catalog-derived values verbatim, then reports the clean-vs-paraphrased gap. Its
-scores are diagnostic only and are never comparable to the official evaluator:
-
-```bash
-python3 -m tests.paraphrase_harness                 # full public set
-python3 -m tests.paraphrase_harness --limit 25      # quick smoke run
-python3 -m tests.paraphrase_harness --output docs/cp4_paraphrase_report.json
-```
+**Optional — retraining.** Reranker training scripts and the CP4 cross-encoder
+fine-tuning pipeline are under `scripts/` and `fine-tune/` (see
+`fine-tune/README.md`); they require NumPy/scikit-learn (and PyTorch for the
+cross-encoder) but are never needed at runtime.
 
 ## Agent Interface
 
@@ -178,47 +207,31 @@ class Agent:
         }
 ```
 
-`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`, `brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See `docs/agent_api_contract.json`.
+`ask_attribute` is one of `category`, `material`, `color`, `size`, `style`,
+`brand`, `budget`, `feature`, `use_case`, `other`, or `null`. See
+[`docs/agent_api_contract.json`](docs/agent_api_contract.json).
 
-## Technical Metrics
-
-- **Hit Rate@10:** fraction of sessions that find the target within 10 turns.
-- **MRR:** mean reciprocal rank of the target; a miss contributes zero.
-- **MTTC:** mean first-hit turn; a miss is assigned turn 11.
-- **Reported token usage:** prompt and completion tokens returned by the team's model client.
+## Repository Layout
 
 ```text
-TechnicalScore = 0.50 × HitRate@10 + 0.30 × MRR + 0.20 × Efficiency
-Efficiency = clip((11 - MTTC) / 10, 0, 1)
-```
-
-`TechnicalScore` is an objective input to the `Technical Execution` assessment. It is not a separate judging criterion and does not represent the entire `Technical Execution` score.
-
-Only exact `parent_asin` equality produces a hit. Core metrics are also reported by scenario.
-
-## Model Choice and Cost
-
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
-
-## Files
-
-```text
+starter/                          the agent: orchestrator, dialogue cards, reranker weights
+evaluator/local_evaluator.py      official public-set simulator and scorer (unmodified)
 data/public_set.jsonl             200 labeled development sessions
-docs/competition_specification.md participant rules and evaluation protocol
-docs/final_evaluation_faq.md      final evaluation and judging clarifications
-docs/agent_api_contract.json      machine-readable Agent contract
-docs/evaluation_config.json       scoring configuration
-docs/baseline_results.json        reproducible weak-starter reference score
-starter/agent.py                  editable weak starter
-evaluator/local_evaluator.py      public-set simulator and scorer
+data/cp2_split.json               target-blind 150 dev / 50 holdout manifest
+scripts/                          experiment drivers, synthetic-set generators, trainers
+tests/                            unit tests and the unofficial paraphrase harness
+fine-tune/                        CP4 cross-encoder training pipeline (offline only)
+models/cp4-tinybert-reranker/     4.49 MB quantized ONNX model + provenance manifest
+EXPERIMENTS.md                    consolidated CP1–CP6 + unmerged-branch experiment ledger
+DEV_README.md                     synthetic test-case workflow
+docs/                             competition spec, FAQ, API contract, scoring config
+docs/baseline_results.json        weak-starter reference (HR 0.125, MRR 0.068, MTTC 9.81)
 ```
-
-## Judging and Submission Policy
-
-- Participant submission requirements: `docs/submission_rules.md`
-- Final evaluation FAQ: `docs/final_evaluation_faq.md`
 
 ## Data Source
 
-The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab, UCSD. See `DATA_ATTRIBUTION.md` before using or redistributing the data.
-Sessions are sampled deterministically from the official Clothing 5-core leave-last-out split and joined to the frozen catalog.
+The catalog and sessions are derived from Amazon Reviews 2023 by McAuley Lab,
+UCSD. See [`DATA_ATTRIBUTION.md`](DATA_ATTRIBUTION.md) before using or
+redistributing the data. Sessions are sampled deterministically from the
+official Clothing 5-core leave-last-out split and joined to the frozen
+catalog.
