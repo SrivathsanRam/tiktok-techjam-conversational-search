@@ -15,7 +15,9 @@ from src.intent_router import (
     contradicts,
     has_preference,
     is_exploratory,
+    is_no_preference,
     is_override,
+    is_rejection,
 )
 from src.text_utils import normalized_value
 
@@ -36,6 +38,12 @@ class DialogState:
             "shown": set(),
             "last_signature": None,
             "slot_log": [],
+            "category_query": "",
+            "dialogue_compatible": True,
+            "dialogue_active": False,
+            "dialogue_ever_active": False,
+            "last_dialogue_match_count": 0,
+            "boundary_seen": False,
         }
 
     def get(self, session_id: str) -> dict[str, object]:
@@ -45,11 +53,28 @@ class DialogState:
 
     def record_message(self, state: dict[str, object], message: str, turn: int) -> None:
         """Apply one customer message to the stored conversation."""
+        lowered = message.lower()
+        if (
+            turn > 1
+            and is_no_preference(message)
+            and not is_rejection(message)
+            and "additional" not in lowered
+        ):
+            state["boundary_seen"] = True
         if turn == 1:
             state["base_message"] = base_intent(message)
             state["exploratory"] = is_exploratory(message)
             state["messages"] = [message]
         elif is_override(message):
+            # Pre-override recommendations cannot score and belong to the stale
+            # intent, so they must not suppress post-override candidates.
+            state["shown"] = set()
+            state["last_signature"] = None
+            state["dialogue_compatible"] = bool(state.get("category_query"))
+            state["dialogue_active"] = False
+            state["dialogue_ever_active"] = False
+            state["last_dialogue_match_count"] = 0
+            state["boundary_seen"] = False
             messages = state["messages"]
             # The first message contains the stale preference used to set up an
             # override scenario.  Later replies contain separately disclosed

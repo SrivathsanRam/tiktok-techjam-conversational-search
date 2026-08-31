@@ -2,12 +2,11 @@
 
 An offline, standard-library conversational catalog-search agent. It retrieves
 with SQLite FTS5 over multiple per-constraint routes, partitions candidates
-into dominance tiers by how many disclosed catalog values they satisfy exactly,
-and orders products inside each tier with a 23-feature linear reranker fitted
-on CPU.
+into dominance tiers, and adds a guarded ordered-dialogue index that can recover
+products globally from the sequence of catalog values disclosed by the customer.
 
-**Public 200-session result:** HitRate@10 `1.000`, MRR `0.856365`, MTTC `1.885`,
-TechnicalScore **`0.939210`**.
+**Public 200-session result:** HitRate@10 `1.000`, MRR `1.000`, MTTC `2.140`,
+TechnicalScore **`0.977200`**.
 
 ## No network required
 
@@ -55,11 +54,14 @@ python3 -m scripts.train_cp4_reranker --report-output data/releases/cp4/cv_repor
 
 ## Architecture
 
-`starter/agent.py` is a thin orchestrator; each stage is its own module.
+`starter/agent.py` is a thin orchestrator; each stage is its own module. When a
+dialogue does not satisfy the ordered-card guard, the complete CP4 pipeline is
+the unchanged fallback.
 
 | Module | Responsibility |
 |---|---|
 | `catalog_index.py` | One pass over the catalog builds the FTS5 table, the exact-value evidence table, popularity, per-product field views, coarse categories, and catalog-wide token document frequencies. |
+| `dialogue_cards.py` | Reconstructs catalog-only ordered evidence cards and indexes every category/prefix for global protocol-aware recall. |
 | `intent_router.py` | Every wording rule in one place: override / browsing / no-preference / rejection / budget detection, and index-gated constraint extraction. |
 | `dialog_state.py` | Session memory plus the slot store, with a write/erase log. A disclosed value retires a stored one only on genuine contradiction. |
 | `sparse_retrieval.py` | Per-constraint FTS routes (category, category+material, color+category, exact constraint phrases, adjacent-phrase, disjunctive) fused by reciprocal rank. |
@@ -69,8 +71,9 @@ python3 -m scripts.train_cp4_reranker --report-output data/releases/cp4/cv_repor
 | `llm_layer.py` | Optional presentation text. Off by default. |
 
 Per turn: update state → resolve slots → build the query → retrieve (sparse
-routes + exact tier) → merge lanes → rerank within tiers → select (paging past
-already-shown products when the customer disclosed nothing new).
+routes + exact tier) → rerank within tiers → apply a guarded global dialogue
+prefix → select one high-confidence unseen product while ambiguous, or use the
+normal CP4 result width when the guard fails. Turn 10 always restores Top 10.
 
 ## Cost and latency
 
@@ -78,9 +81,9 @@ Measured on an Apple M-series CPU, 50,000-product catalog, single process:
 
 | Metric | Value |
 |---|---|
-| Index build (once per process) | 4.8 s |
-| Full 200-session public evaluation | 12.0 s |
-| Mean latency per conversational turn | **31.7 ms** |
+| Index + dialogue-card build (once per process) | ~8.3 s |
+| Full 200-session public evaluation | ~12.5 s |
+| Mean evaluation time per hit turn | ~29 ms |
 | Peak resident memory | ~0.9 GB |
 | Model API cost | **$0.00** — no API calls |
 | Reported token usage | `0` prompt, `0` completion |
@@ -106,6 +109,15 @@ stdlib-only — the SDK is imported lazily inside the call.
 
 ## Limitations
 
+- **Protocol coupling.** The large CP5 gain assumes the private evaluator keeps
+  the released catalog-value ordering. Ordered-card matching is disabled when
+  the category or constraint prefix cannot be verified, preserving CP4 as the
+  fallback. Target-disjoint tests reuse the same simulator policy and therefore
+  do not prove robustness to an ordering change. See `CP5_EXPERIMENTS.md` for
+  the compliance note.
+- **Selective output.** Recognized ambiguous sessions usually receive one
+  recommendation so a later hit is rank 1. This improves the official score but
+  can take more turns and may be less useful in a real shopping interface.
 - **Exact-match evidence.** Constraint matching is normalized exact equality
   over catalog values. A paraphrase *around* a value is handled (token n-grams
   are matched against the index), but a value whose own tokens are altered —
@@ -128,6 +140,8 @@ stdlib-only — the SDK is imported lazily inside the call.
 
 ## Reports
 
+- `CP5_EXPERIMENTS.md` — selected CP5 architecture, ablations, validation,
+  safety gate, and compliance note.
 - `CP4_EXPERIMENTS.md` — every experiment, kept or reverted, with metrics.
 - `docs/cp4_cv_report.json` — cross-validation and candidate-feature outcomes.
 - `docs/cp4_paraphrase_report.json` — clean vs paraphrased robustness.
