@@ -18,6 +18,42 @@ the CP3 selected configuration at TechnicalScore `0.932620`.
 | 2.2 | Current agent on synthetic_dev (1000) | Synthetic dev | 1.0000 | 0.696668 | 2.040 | 0.888200 | Recorded: Task 3 selection baseline |
 | 2.3 | Current agent on hard-case set (500) | Hard cases | 0.8680 | 0.462138 | 4.060 | 0.711441 | Recorded: confirms the funnel struggles on common-attribute / dense-neighborhood targets |
 
+| 3.1 | Retrained within-tier MRR-weighted reranker (18 features, C=0.1), full dominance ON | Public 200 | **1.0000** | **0.853929** | **1.880** | **0.938579** | **Keep: new best; public_0020 fixed (turn 2, rank 7); baseline +0.005959** |
+| 3.2 | Same weights, dominance on rotation turns only | Public 200 | 1.0000 | 0.842208 | 1.900 | 0.934662 | Revert: full dominance is better with within-tier-trained weights |
+| 3.3 | Selected config, one-shot confirm | Public holdout 50 | 1.0000 | 0.875000 | 1.920 | 0.944100 | Confirmed (untouched during selection) |
+| 3.4 | Selected config, one-shot confirm | Synthetic holdout 1000 | 1.0000 | 0.763188 | 2.040 | 0.908156 | Confirmed (aggregate-only) |
+| 3.5 | Selected config re-run | Synthetic dev 1000 | 1.0000 | 0.749971 | 1.981 | 0.905371 | Recorded: +0.017171 over row 2.2 |
+| 3.6 | Selected config re-run | Hard cases 500 | 0.9060 | 0.518359 | 3.546 | 0.757588 | Recorded: +0.046147 over row 2.3 |
+
+## Task 3 notes
+
+- Protocol `cp4-within-tier-mrr-weighted-v1` (`scripts/train_cp4_reranker.py`,
+  full report in `docs/cp4_cv_report.json`). Groups replay public dev 150 +
+  synthetic_train 3000 + synthetic_dev 1000 with full tier dominance; 11,502
+  groups, 79.18% train-group target coverage, 168,413 weighted pairs.
+- Pairs exist only within the target's dominance tier (3a). Each pair is
+  weighted by |1/r_target − 1/r_other| under the CP3 reference ranking, ×3
+  when the pair crosses the top-10 boundary, ×20 for public sessions (3b/3c).
+- Selection = mean of public five-fold out-of-fold TechnicalScore and
+  synthetic_dev TechnicalScore, computed statically with the dominance rank
+  rule (global rank = higher-tier count + within-tier rank). The untouched
+  public holdout 50 and synthetic_holdout were evaluated exactly once, with
+  the real evaluator, after freezing the configuration (rows 3.3/3.4).
+- Candidate-feature outcomes (3d, selection score vs base16 0.907441 at the
+  same C): coarse_category_equality +0.011244 (kept),
+  coarse_category_overlap +0.006716 (kept), satisfied_constraints −0.000445
+  (dropped: within a tier the count is constant, so pairwise differences are
+  zero in dominance mode and it adds nothing beyond feature 15 elsewhere),
+  max_matched_rarity −0.000007 (dropped), unmatched_rarity −0.000007
+  (dropped), price_presence_when_budget ±0.000000 (dropped),
+  preference_tag_overlap −0.001235 (dropped: synthetic profiles carry no
+  tags and public tags like "comfort" match most apparel).
+- Runtime consequence: `use_fresh_tier_dominance` now defaults to True —
+  dominance ordering applies on every turn, which is the ordering the
+  training pairs assume (3a). The 18 shipped weights live in
+  `starter/reranker_weights.json`; the loader zero-fills the five unselected
+  candidate features, keeping the runtime feature vector stable at 23.
+
 ## Task 2 notes
 
 - `scripts/create_cp4_synthetic_sets.py` (seed 20260831) generates all 5000

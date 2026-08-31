@@ -27,6 +27,13 @@ RERANK_FEATURE_NAMES = (
     "specific_constraint",
     "exact_evidence_coverage",
     "exact_evidence_rarity",
+    "satisfied_constraints",
+    "coarse_category_equality",
+    "coarse_category_overlap",
+    "max_matched_rarity",
+    "unmatched_rarity",
+    "price_presence_when_budget",
+    "preference_tag_overlap",
 )
 MATERIAL_TERMS = {
     "cotton", "polyester", "nylon", "leather", "wool", "spandex", "silk", "rayon", "fabric",
@@ -68,6 +75,18 @@ def _normalized_value(text: str) -> str:
     return " ".join(token.lower() for token in TOKEN_RE.findall(text))
 
 
+def _coarse_category(values: list[str]) -> str:
+    """The generic-prefix-free tail of a category list, as the simulator words it."""
+    excluded = {"clothing", "clothing shoes & jewelry", "clothing, shoes & jewelry"}
+    cleaned: list[str] = []
+    for value in values:
+        for part in str(value).split(","):
+            part = part.strip()
+            if part and part.lower() not in excluded:
+                cleaned.append(part)
+    return " ".join(cleaned[-2:]) if cleaned else "clothing item"
+
+
 class Agent:
     """Offline stateful agent with adaptive multi-route lexical retrieval."""
 
@@ -81,6 +100,7 @@ class Agent:
         rerank_candidate_limit: int = 80,
         use_coverage_rotation: bool = True,
         coverage_head: int = 0,
+        use_fresh_tier_dominance: bool = True,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
@@ -94,12 +114,16 @@ class Agent:
         self._rerank_candidate_limit = rerank_candidate_limit
         self._use_coverage_rotation = use_coverage_rotation
         self._coverage_head = coverage_head
+        self._use_fresh_tier_dominance = use_fresh_tier_dominance
         self._exact_cache: dict[str, tuple[str, ...]] = {}
         self._exact_membership_cache: dict[str, frozenset[str]] = {}
         self._product_profile_cache: dict[
             str, tuple[tuple[frozenset[str], ...], frozenset[str], str]
         ] = {}
         self._constraint_terms_cache: dict[str, frozenset[str]] = {}
+        self._coarse_category_views: dict[str, tuple[str, frozenset[str]]] = {}
+        self._requested_category_cache: dict[str, tuple[str, frozenset[str]]] = {}
+        self._budget_disclosed_cache: dict[str, bool] = {}
         self._build_index()
         self._max_popularity = max(self._popularity.values(), default=1.0)
         self._reranker_weights = self._load_reranker_weights() if load_reranker else None
@@ -113,7 +137,9 @@ class Agent:
         weights = payload.get("weights")
         if not isinstance(weights, dict):
             raise ValueError("reranker_weights.json must contain a weights object")
-        return tuple(float(weights[name]) for name in RERANK_FEATURE_NAMES)
+        # Features absent from the fitted file carry zero weight, so an older
+        # 16-feature file scores identically on the extended feature vector.
+        return tuple(float(weights.get(name, 0.0)) for name in RERANK_FEATURE_NAMES)
 
     def _build_index(self) -> None:
         cursor = self.connection.cursor()
@@ -156,6 +182,13 @@ class Agent:
                     store.lower(),
                     description.lower(),
                     price,
+                )
+                coarse = _coarse_category(
+                    [str(value) for value in product.get("categories") or []]
+                )
+                self._coarse_category_views[parent_asin] = (
+                    _normalized_value(coarse),
+                    frozenset(_terms(coarse)),
                 )
                 batch.append(
                     (
@@ -406,9 +439,12 @@ class Agent:
 
     def _exact_evidence_features(
         self, parent_asin: str, constraints: list[str]
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float, float, float]:
+        """Coverage, mean rarity, raw count, max rarity, and unmatched rarity."""
         matched_values = 0
         matched_rarity = 0.0
+        max_matched_rarity = 0.0
+        unmatched_rarity = 0.0
         indexed_constraints = 0
         max_idf = math.log((50000.0 + 1.0) / 2.0)
         for constraint in constraints:
@@ -421,13 +457,51 @@ class Agent:
             if members is None:
                 members = frozenset(postings)
                 self._exact_membership_cache[normalized] = members
+            rarity = math.log((50000.0 + 1.0) / (len(postings) + 1.0)) / max_idf
             if parent_asin in members:
                 matched_values += 1
-                matched_rarity += math.log(
-                    (50000.0 + 1.0) / (len(postings) + 1.0)
-                ) / max_idf
+                matched_rarity += rarity
+                max_matched_rarity = max(max_matched_rarity, rarity)
+            else:
+                unmatched_rarity += rarity
         denominator = max(1, indexed_constraints)
-        return matched_values / denominator, matched_rarity / denominator
+        return (
+            matched_values / denominator,
+            matched_rarity / denominator,
+            float(matched_values),
+            max_matched_rarity,
+            unmatched_rarity / denominator,
+        )
+
+    def _requested_category(self, base_message: str) -> tuple[str, frozenset[str]]:
+        """Category phrase disclosed on turn 1, as normalized string and terms."""
+        cached = self._requested_category_cache.get(base_message)
+        if cached is not None:
+            return cached
+        lowered = str(base_message).lower()
+        marker = "looking for"
+        index = lowered.find(marker)
+        phrase = ""
+        if index >= 0:
+            remainder = lowered[index + len(marker):]
+            for stop in (",", ".", ";", " but "):
+                position = remainder.find(stop)
+                if position >= 0:
+                    remainder = remainder[:position]
+            phrase = remainder.strip()
+        cached = (_normalized_value(phrase), frozenset(_terms(phrase)))
+        self._requested_category_cache[base_message] = cached
+        return cached
+
+    def _budget_disclosed(self, query_text: str) -> bool:
+        cached = self._budget_disclosed_cache.get(query_text)
+        if cached is None:
+            cached = bool(
+                re.search(r"budget\s+around\s+\$?[0-9]", query_text, re.I)
+                or re.search(r"(?:under|below|up to|<=)\s*\$?[0-9]", query_text, re.I)
+            )
+            self._budget_disclosed_cache[query_text] = cached
+        return cached
 
     @staticmethod
     def _budget_score(query_text: str, price: float | None) -> float:
@@ -543,9 +617,41 @@ class Agent:
         popularity = self._popularity.get(parent_asin, 0.0) / max(1.0, self._max_popularity)
         exploratory = bool(state["exploratory"])
         retrieval = 1.0 / math.log2(rank + 1.0)
-        exact_coverage, exact_rarity = self._exact_evidence_features(
-            parent_asin, constraints
+        (
+            exact_coverage,
+            exact_rarity,
+            satisfied_constraints,
+            max_matched_rarity,
+            unmatched_rarity,
+        ) = self._exact_evidence_features(parent_asin, constraints)
+
+        requested_norm, requested_terms = self._requested_category(
+            str(state.get("base_message") or "")
         )
+        coarse_norm, coarse_terms = self._coarse_category_views.get(
+            parent_asin, ("", frozenset())
+        )
+        coarse_equality = 1.0 if requested_norm and requested_norm == coarse_norm else 0.0
+        coarse_overlap = (
+            len(requested_terms & coarse_terms) / len(requested_terms)
+            if requested_terms else 0.0
+        )
+        price = self._product_views[parent_asin][6]
+        price_presence = (
+            1.0 if price is not None and self._budget_disclosed(query_text) else 0.0
+        )
+        profile = state.get("user_profile")
+        tags = profile.get("preference_tags") if isinstance(profile, dict) else None
+        tag_overlap = 0.0
+        if isinstance(tags, list) and tags:
+            combined_terms = self._product_profile(parent_asin)[1]
+            matched_tags = sum(
+                1 for tag in tags
+                if (tag_terms := self._constraint_terms(str(tag)))
+                and tag_terms <= combined_terms
+            )
+            tag_overlap = matched_tags / len(tags)
+
         return (
             retrieval,
             *compatibility,
@@ -554,15 +660,22 @@ class Agent:
             compatibility[5] if not exploratory else 0.0,
             exact_coverage,
             exact_rarity,
+            satisfied_constraints,
+            coarse_equality,
+            coarse_overlap,
+            max_matched_rarity,
+            unmatched_rarity,
+            price_presence,
+            tag_overlap,
         )
 
     @staticmethod
     def _fallback_structured_score(features: tuple[float, ...]) -> float:
         (
-            _, coverage, title_coverage, category_coverage, attribute_coverage,
+            coverage, title_coverage, category_coverage, attribute_coverage,
             description_coverage, constraint_coverage, exact_fraction,
-            material_match, color_match, budget_match, _, _, _, _, _,
-        ) = features
+            material_match, color_match, budget_match,
+        ) = features[1:11]
         raw = (
             3.0 * coverage
             + 0.6 * title_coverage
@@ -665,7 +778,7 @@ class Agent:
             and isinstance(shown, set)
         )
         if exact_candidates:
-            if tier_counts and rotating:
+            if tier_counts and (rotating or self._use_fresh_tier_dominance):
                 # Rotation pages the entire top dominance tier: keep every
                 # tier member so unseen ones surface across turns.
                 exact_set = set(exact_candidates)
