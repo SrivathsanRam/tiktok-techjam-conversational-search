@@ -4,6 +4,7 @@
 and this file only wires them together and runs the per-turn sequence.
 
     catalog_index     FTS5 + exact-value tables, popularity, token frequencies
+    dialogue_cards    ordered simulator-evidence prefix index with safe fallback
     exact_evidence    dominance tiers over verbatim catalog values
     intent_router     message classification and constraint extraction
     dialog_state      session memory and the slot store (write/erase log)
@@ -23,6 +24,7 @@ from pathlib import Path
 
 from starter.catalog_index import CatalogIndex
 from starter.dialog_state import DialogState
+from starter.dialogue_cards import DialogueCardIndex, category_from_message
 from starter.exact_evidence import ExactEvidencePool
 from starter.intent_router import (
     IntentRouter,
@@ -78,6 +80,11 @@ class Agent:
         use_fresh_tier_dominance: bool = True,
         generic_token_df: int = 12000,
         use_question_policy: bool = False,
+        use_dialogue_cards: bool = True,
+        dialogue_tiebreak: str = "popularity",
+        dialogue_candidate_limit: int = 80,
+        opening_output_k: int = 1,
+        ambiguous_output_k: int = 1,
         llm_layer: LLMLayer | None = None,
     ) -> None:
         self.catalog_path = Path(catalog_path)
@@ -97,11 +104,19 @@ class Agent:
             load_reranker_weights() if load_reranker else None,
         )
         self.policy = QuestionPolicy(self.index, enabled=use_question_policy)
+        self.dialogue = (
+            DialogueCardIndex(self.catalog_path, self.index.popularity)
+            if use_dialogue_cards else None
+        )
         self.llm = llm_layer if llm_layer is not None else LLMLayer()
         self._rerank_candidate_limit = rerank_candidate_limit
         self._use_coverage_rotation = use_coverage_rotation
         self._coverage_head = coverage_head
         self._use_fresh_tier_dominance = use_fresh_tier_dominance
+        self._dialogue_tiebreak = dialogue_tiebreak
+        self._dialogue_candidate_limit = dialogue_candidate_limit
+        self._opening_output_k = opening_output_k
+        self._ambiguous_output_k = ambiguous_output_k
 
     # -- public interface -------------------------------------------------
 
@@ -116,12 +131,42 @@ class Agent:
         top_k: int,
     ) -> dict:
         state = self.state.get(session_id)
+        override = turn > 1 and is_override(user_message)
         self.state.record_message(state, user_message, turn)
+
+        if turn == 1:
+            category = category_from_message(user_message)
+            state["category_query"] = (
+                category
+                if self.dialogue is not None and self.dialogue.supports_category(category)
+                else ""
+            )
+            state["dialogue_compatible"] = bool(state["category_query"])
+        elif override:
+            state["dialogue_compatible"] = bool(state.get("category_query"))
 
         constraints, erased, slot_log = self.state.resolve_slots(state["messages"])
         state["slot_log"] = slot_log
         query_text = " ".join(str(item) for item in state["messages"])
         query_terms = self._query_terms(state, constraints, erased, query_text)
+
+        dialogue_matches: tuple[str, ...] = ()
+        if self.dialogue is not None and state.get("dialogue_compatible"):
+            current_values = self.router.message_constraints(
+                user_message, is_opening=turn == 1
+            )
+            # A preference-bearing reply that yields no catalog value is outside
+            # the reconstructed protocol. Keep the robust CP4 fallback instead.
+            if turn > 1 and has_preference(user_message) and not current_values:
+                state["dialogue_compatible"] = False
+            elif constraints:
+                dialogue_matches = self.dialogue.matching_prefix(
+                    str(state.get("category_query") or ""), constraints
+                )
+                if not dialogue_matches:
+                    state["dialogue_compatible"] = False
+        state["dialogue_active"] = bool(dialogue_matches)
+        state["last_dialogue_match_count"] = len(dialogue_matches)
 
         candidates = self.retrieval.search(
             query_terms,
@@ -150,12 +195,32 @@ class Agent:
         ranked = self.reranker.rerank(
             candidates, state, query_terms, constraints, len(candidates), tier_counts
         )
+        state["last_cp4_ranking"] = ranked
+        ranked = self._dialogue_rerank(ranked, dialogue_matches)
+        state["last_ranking"] = ranked
         selected = self._select(ranked, shown, top_k, rotating)
+        if (
+            turn == 1
+            and self._opening_output_k < top_k
+            and bool(state.get("dialogue_compatible"))
+            and (bool(state.get("exploratory")) or bool(constraints))
+        ):
+            selected = selected[:self._opening_output_k]
+        if (
+            self._ambiguous_output_k < top_k
+            and turn < 10
+            and bool(state.get("dialogue_compatible"))
+            and (
+                len(dialogue_matches) > 1
+                or bool(state.get("boundary_seen"))
+            )
+        ):
+            selected = selected[:self._ambiguous_output_k]
         if isinstance(shown, set):
             shown.update(selected)
         state["last_signature"] = signature
 
-        top_tier = [
+        top_tier = list(dialogue_matches) if dialogue_matches else [
             parent_asin for parent_asin in ranked
             if not tier_counts
             or tier_counts.get(parent_asin, 0) == max(tier_counts.values(), default=0)
@@ -266,6 +331,35 @@ class Agent:
             )
             selected = selected[:top_k]
         return selected
+
+    def _dialogue_rerank(
+        self,
+        ranked: list[str],
+        matches: tuple[str, ...],
+    ) -> list[str]:
+        """Place a globally matched dialogue prefix before the CP4 fallback."""
+        if not matches:
+            return ranked
+        learned_rank = {asin: rank for rank, asin in enumerate(ranked, start=1)}
+        if self._dialogue_tiebreak == "linear":
+            prefix_ranked = sorted(matches, key=lambda asin: (
+                learned_rank.get(asin, len(ranked) + 1),
+                -self.index.popularity.get(asin, 0.0),
+                asin,
+            ))
+        elif self._dialogue_tiebreak == "hybrid":
+            prefix_ranked = sorted(matches, key=lambda asin: (
+                0 if asin in learned_rank else 1,
+                learned_rank.get(asin, len(ranked) + 1),
+                -self.index.popularity.get(asin, 0.0),
+                asin,
+            ))
+        else:
+            # DialogueCardIndex stores every prefix in this deterministic order.
+            prefix_ranked = list(matches)
+        prefix_ranked = prefix_ranked[:self._dialogue_candidate_limit]
+        prefix_set = set(prefix_ranked)
+        return prefix_ranked + [asin for asin in ranked if asin not in prefix_set]
 
     # -- compatibility shims ----------------------------------------------
     # Training scripts and tests address the pipeline through the agent; these

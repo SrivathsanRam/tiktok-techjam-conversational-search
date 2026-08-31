@@ -513,5 +513,107 @@ class DominanceTierRotationTest(unittest.TestCase):
         self.assertNotIn("Z0", ranked)
 
 
+class DialoguePolicyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.catalog_path = Path(self.temporary_directory.name) / "catalog.jsonl"
+        products = [
+            {
+                "parent_asin": f"P{index}",
+                "title": f"Cotton belt {index}",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Imported"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Everyday belt"],
+                "rating_number": 100 - index,
+            }
+            for index in range(3)
+        ]
+        products.append({
+            "parent_asin": "LEATHER",
+            "title": "Leather belt",
+            "categories": ["Accessories", "Belts"],
+            "features": ["Imported"],
+            "details": {"department": "mens"},
+            "store": "Example",
+            "description": ["Everyday belt"],
+            "rating_number": 500,
+        })
+        self.catalog_path.write_text(
+            "".join(json.dumps(product) + "\n" for product in products),
+            encoding="utf-8",
+        )
+        self.agent = Agent(self.catalog_path)
+        self.agent.reset("session", {})
+
+    def tearDown(self) -> None:
+        self.agent.connection.close()
+        self.temporary_directory.cleanup()
+
+    def test_ambiguous_prefix_returns_one_and_rotates_unseen(self) -> None:
+        first = self.agent.respond(
+            "session",
+            "I'm looking for Accessories Belts. A key requirement is: cotton.",
+            1,
+            10,
+        )
+        second = self.agent.respond(
+            "session", "I don't have an additional preference for other.", 2, 10
+        )
+        self.assertEqual(len(first["recommendations"]), 1)
+        self.assertEqual(len(second["recommendations"]), 1)
+        self.assertNotEqual(first["recommendations"], second["recommendations"])
+
+    def test_final_turn_relaxes_singleton_policy(self) -> None:
+        self.agent.respond(
+            "session",
+            "I'm looking for Accessories Belts. A key requirement is: cotton.",
+            1,
+            10,
+        )
+        final = self.agent.respond(
+            "session", "I don't have an additional preference for other.", 10, 10
+        )
+        self.assertGreater(len(final["recommendations"]), 1)
+
+    def test_unknown_opening_keeps_cp4_multi_result_fallback(self) -> None:
+        fallback = self.agent.respond("session", "Find cotton belts for me", 1, 10)
+        self.assertFalse(self.agent._sessions["session"]["dialogue_compatible"])
+        self.assertGreater(len(fallback["recommendations"]), 1)
+
+    def test_altered_constraint_order_disables_dialogue_path(self) -> None:
+        response = self.agent.respond(
+            "session",
+            "I'm looking for Accessories Belts. A key requirement is: imported; cotton.",
+            1,
+            10,
+        )
+        self.assertFalse(self.agent._sessions["session"]["dialogue_compatible"])
+        self.assertGreater(len(response["recommendations"]), 1)
+
+    def test_global_dialogue_match_can_precede_cp4_pool(self) -> None:
+        self.assertEqual(
+            self.agent._dialogue_rerank(["P2"], ("P0", "P2"))[:2],
+            ["P0", "P2"],
+        )
+
+    def test_override_clears_stale_shown_products(self) -> None:
+        first = self.agent.respond(
+            "session",
+            "I'm looking for Accessories Belts. A key requirement is: leather.",
+            1,
+            10,
+        )
+        stale = first["recommendations"][0]["parent_asin"]
+        self.agent.respond(
+            "session",
+            "Actually, ignore my earlier preference. What I need is: cotton.",
+            2,
+            10,
+        )
+        self.assertNotIn(stale, self.agent._sessions["session"]["shown"])
+
+
 if __name__ == "__main__":
     unittest.main()

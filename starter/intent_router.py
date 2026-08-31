@@ -119,6 +119,14 @@ def has_preference(message: str) -> bool:
     return not (NO_PREFERENCE_RE.search(message) or NEGATIVE_RE.search(message))
 
 
+def is_no_preference(message: str) -> bool:
+    return bool(NO_PREFERENCE_RE.search(message))
+
+
+def is_rejection(message: str) -> bool:
+    return bool(NEGATIVE_RE.search(message))
+
+
 def base_intent(message: str) -> str:
     # The initial category precedes the first sentence boundary.  Keeping only
     # that clause prevents an Intent Override from retaining the stale value.
