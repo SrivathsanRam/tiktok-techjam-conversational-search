@@ -17,3 +17,7 @@ tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
 .venv-train/
+submission/__pycache__/
+submission/src/__pycache__/
+# Large local data artifact, not part of the submission bundle.
+catalog.jsonl.gz

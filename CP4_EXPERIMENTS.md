@@ -41,6 +41,77 @@ the CP3 selected configuration at TechnicalScore `0.932620`.
 | 5.9 | Paraphrase harness, pre-Task-5 agent (row 4.1 code) | Public 200 paraphrased | 0.9850 | 0.616435 | 2.230 | 0.852830 | Reference: gap 0.086380 |
 | 5.10 | **Paraphrase harness, Task 5 agent** | Public 200 paraphrased | 0.9800 | 0.723062 | 2.195 | **0.883018** | **Gap 0.056192 < 0.1 target; paraphrased MRR +0.106627** |
 
+| 6.1 | **Module split (6a): agent.py becomes a thin orchestrator over 8 modules** | Public 200 | 1.0000 | 0.856365 | 1.885 | **0.939210** | **Keep: identical aggregates AND identical (first_hit_turn, best_rank) on all 200 sessions** |
+| 6.2 | Question policy ON (6b), ties broken alphabetically | Public 200 | 0.9350 | 0.796317 | 2.465 | 0.877095 | Revert: alphabetical ties chose `feature` over the equally-scoring open question |
+| 6.3 | Question policy ON, ties prefer the open question | Public 200 | 1.0000 | 0.853448 | 1.890 | 0.938234 | Ship disabled: −0.000976 vs baseline |
+| 6.4 | Question policy ON, spec stop-rule removed (diagnostic) | Public 200 | 1.0000 | 0.856365 | 1.885 | 0.939210 | Diagnostic: the estimator alone is exactly free; the whole −0.000976 is the stop rule |
+| 6.5 | LLM layer (6c) present but disabled; packaging/docs (6d) | Public 200 | 1.0000 | 0.856365 | 1.885 | **0.939210** | **Keep: no scored-behavior change** |
+
+## Task 6 notes
+
+### 6a — module split, verified behavior-identical
+
+`starter/agent.py` (1114 lines) became a 300-line orchestrator plus eight
+modules: `text_utils`, `catalog_index`, `exact_evidence`, `intent_router`,
+`dialog_state` (slot store with write/erase logging), `sparse_retrieval`,
+`reranker`, `question_policy`, and the optional `llm_layer`. Verification was
+stronger than equal aggregates: the pre- and post-refactor `results.json` agree
+on `(first_hit_turn, best_rank)` for every one of the 200 sessions. Training
+scripts and tests reach the pipeline through one-line compatibility shims on
+`Agent`, so no algorithm is duplicated.
+
+### 6b — question policy
+
+For each allowed attribute the policy partitions the current top tier by that
+attribute's values and computes the expected remaining size
+`Σ nₖ² / N`; expected reduction is `N − Σ nₖ² / N`. It picks the argmax, logs
+every estimate on the session as `question_estimates`, and returns
+`ask_attribute=None` once the top tier is ≤ 10.
+
+Two findings, both measured:
+
+1. Tie-breaking matters more than the estimator. `feature` and `other` often
+   tie exactly (the open question's partition is the join of all the others),
+   and breaking ties alphabetically cost `0.062`. Preferring the open question
+   on ties is also the correct reading: at equal expected reduction, the
+   question that accepts any constraint type is likelier to be answered at all.
+2. With that fix the estimator is exactly free — row 6.4 reproduces the
+   baseline to six decimals. The entire remaining `−0.000976` is the specified
+   "stop asking when the tier ≤ 10" rule, which occasionally forecloses a
+   disclosure that would have re-tiered a target sitting outside a small tier.
+
+Because CLAUDE.md requires reverting anything that lowers the score, the policy
+ships **disabled** (`Agent(use_question_policy=True)` enables it), with the
+cost attributed rather than hidden.
+
+### 6c — optional LLM layer
+
+Off unless `TECHJAM_LLM_ENABLED=1`. It receives the already-ranked list and
+returns only message text plus one-line explanations keyed by `parent_asin`, so
+it structurally cannot reorder, add, or drop a recommendation; it reports the
+API's real `input_tokens`/`output_tokens` as `usage`; and any failure — missing
+SDK, missing credential, refusal, malformed JSON — returns the deterministic
+template with zero usage. The `anthropic` import is lazy, so the default
+runtime stays standard-library only and offline. Three unit tests cover the
+disabled path, the failure path, and the flag semantics.
+
+### 6d — packaging and hygiene
+
+- `requirements.txt` documents a dependency-free runtime (Python 3.10+, sqlite3
+  with FTS5); `requirements-train.txt` pins the training extras actually used to
+  fit the weights (numpy 2.5.2, scikit-learn 1.9.0, scipy 1.18.1, joblib 1.6.0,
+  threadpoolctl 3.6.0); `requirements-llm.txt` holds the optional extra.
+- `scripts/build_submission.py` generates `submission/{agent.py,
+  requirements.txt, README.md, src/}` from `starter/` — the single source of
+  truth — rewriting the package prefix, then imports the bundle and runs a
+  session as a smoke test, so a broken package cannot be shipped.
+- The catalog path reads from `TECHJAM_CATALOG`, with no absolute paths in
+  runtime code.
+- `README.md` documents the architecture, one-command reproduction,
+  limitations, and the cost/latency disclosure: 31.7 ms mean per turn, 4.8 s
+  index build, 12.0 s for the full 200-session run, ~0.9 GB peak RSS, $0.00 API
+  cost, zero reported tokens, and "no network required".
+
 ## Task 5 notes
 
 Report: `data/releases/cp4/paraphrase_report.json`; harness:

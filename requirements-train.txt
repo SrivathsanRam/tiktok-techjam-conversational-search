@@ -1,0 +1,8 @@
+# Training-only dependencies (scripts/train_cp4_reranker.py).
+# Never imported by starter/ at runtime; the submitted agent needs none of them.
+# Pinned to the versions used to fit starter/reranker_weights.json.
+numpy==2.5.2
+scikit-learn==1.9.0
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.6.0

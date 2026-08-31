@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from starter.agent import Agent, RERANK_FEATURE_NAMES, _normalized_value
+from starter.llm_layer import LLMLayer
+from starter.question_policy import ALLOWED_ATTRIBUTES
 
 
 class AgentStateTest(unittest.TestCase):
@@ -139,6 +142,94 @@ class AgentStateTest(unittest.TestCase):
             first["recommendations"][0]["parent_asin"],
             second["recommendations"][0]["parent_asin"],
         )
+
+
+class QuestionPolicyTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        catalog_path = Path(self.temporary_directory.name) / "catalog.jsonl"
+        products = [
+            {
+                "parent_asin": f"P{index}",
+                "title": f"Belt {index}",
+                "categories": ["Accessories", "Belts"],
+                "features": ["cotton" if index % 2 else "leather", "Buckle closure"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Belt"],
+            }
+            for index in range(20)
+        ]
+        catalog_path.write_text(
+            "".join(json.dumps(product) + "\n" for product in products),
+            encoding="utf-8",
+        )
+        self.agent = Agent(catalog_path, use_question_policy=True)
+        self.agent.reset("session", {})
+
+    def tearDown(self) -> None:
+        self.agent.connection.close()
+        self.temporary_directory.cleanup()
+
+    def test_policy_stops_asking_once_the_tier_fits_one_page(self) -> None:
+        attribute, estimates = self.agent.policy.choose(["P0", "P1", "P2"])
+        self.assertIsNone(attribute)
+        self.assertEqual(estimates, [])
+
+    def test_policy_logs_an_estimate_per_allowed_attribute(self) -> None:
+        tier = [f"P{index}" for index in range(20)]
+        attribute, estimates = self.agent.policy.choose(tier)
+        self.assertIsNotNone(attribute)
+        self.assertEqual(
+            {item["attribute"] for item in estimates}, set(ALLOWED_ATTRIBUTES)
+        )
+        # Estimates are ordered by expected reduction, largest first.
+        reductions = [item["expected_reduction"] for item in estimates]
+        self.assertEqual(reductions, sorted(reductions, reverse=True))
+
+    def test_material_question_splits_a_mixed_tier(self) -> None:
+        tier = [f"P{index}" for index in range(20)]
+        estimates = {
+            item["attribute"]: item["expected_reduction"]
+            for item in self.agent.policy.choose(tier)[1]
+        }
+        # Half the tier is cotton and half leather, so the material question
+        # is expected to remove half of it.
+        self.assertAlmostEqual(estimates["material"], 10.0, places=4)
+        # Every product shares a size vocabulary of nothing, so asking cannot help.
+        self.assertAlmostEqual(estimates["size"], 0.0, places=4)
+
+    def test_disabled_policy_keeps_the_open_question(self) -> None:
+        agent = Agent(self.agent.catalog_path, use_question_policy=False)
+        try:
+            self.assertEqual(agent.policy.choose(["P0"])[0], "other")
+        finally:
+            agent.connection.close()
+
+
+class LLMLayerTest(unittest.TestCase):
+    def test_layer_is_disabled_unless_the_flag_is_exactly_one(self) -> None:
+        self.assertFalse(LLMLayer(enabled=None).enabled or os.environ.get(
+            "TECHJAM_LLM_ENABLED") == "1")
+
+    def test_disabled_layer_returns_the_template_and_zero_usage(self) -> None:
+        layer = LLMLayer(enabled=False)
+        message, explanations, usage = layer.describe(
+            "template", "query", [{"parent_asin": "A"}], {}, "other"
+        )
+        self.assertEqual(message, "template")
+        self.assertEqual(explanations, {})
+        self.assertEqual(usage, {"prompt_tokens": 0, "completion_tokens": 0})
+
+    def test_enabled_layer_falls_back_to_the_template_on_failure(self) -> None:
+        layer = LLMLayer(enabled=True, model="does-not-exist")
+        message, explanations, usage = layer.describe(
+            "template", "query", [{"parent_asin": "A"}], {"A": ["leather"]}, "other"
+        )
+        self.assertEqual(message, "template")
+        self.assertEqual(explanations, {})
+        self.assertEqual(usage, {"prompt_tokens": 0, "completion_tokens": 0})
+        self.assertIsNotNone(layer.last_error)
 
 
 class ParaphraseRobustnessTest(unittest.TestCase):

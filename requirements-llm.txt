@@ -1,0 +1,4 @@
+# Optional presentation layer only (starter/llm_layer.py), OFF by default.
+# Needed solely when TECHJAM_LLM_ENABLED=1; the layer is imported lazily, so
+# the default offline run never touches this package or the network.
+anthropic>=1.0.0

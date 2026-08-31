@@ -21,10 +21,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from starter.catalog_index import CatalogIndex
-from starter.dialog_state import DialogState
-from starter.exact_evidence import ExactEvidencePool
-from starter.intent_router import (
+from src.catalog_index import CatalogIndex
+from src.dialog_state import DialogState
+from src.exact_evidence import ExactEvidencePool
+from src.intent_router import (
     IntentRouter,
     base_intent,
     budget_score,
@@ -34,16 +34,16 @@ from starter.intent_router import (
     is_exploratory,
     is_override,
 )
-from starter.llm_layer import LLMLayer
-from starter.question_policy import QuestionPolicy
-from starter.reranker import (
+from src.llm_layer import LLMLayer
+from src.question_policy import QuestionPolicy
+from src.reranker import (
     RERANK_FEATURE_NAMES,
     TieredReranker,
     fallback_structured_score,
     load_reranker_weights,
 )
-from starter.sparse_retrieval import SparseRetrieval
-from starter.text_utils import (
+from src.sparse_retrieval import SparseRetrieval
+from src.text_utils import (
     COLOR_TERMS,
     MATERIAL_TERMS,
     STOPWORDS,

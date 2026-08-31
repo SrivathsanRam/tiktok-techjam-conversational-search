@@ -1,0 +1,15 @@
+# Runtime: no third-party packages.
+#
+# starter/ imports only the Python standard library (json, math, os, re,
+# sqlite3, collections, pathlib). The only requirements are:
+#
+#   * Python 3.10 or later (PEP 604 unions, the := operator, zip(strict=True))
+#   * a CPython sqlite3 build with the FTS5 extension compiled in
+#     (verify: python3 -c "import sqlite3;
+#      sqlite3.connect(':memory:').execute('CREATE VIRTUAL TABLE t USING fts5(x)')")
+#
+# The agent runs fully offline and requires no network access.
+#
+# Install the training and optional extras with:
+#   pip install -r requirements-train.txt
+#   pip install -r requirements-llm.txt
