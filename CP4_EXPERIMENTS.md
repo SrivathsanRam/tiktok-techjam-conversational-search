@@ -14,6 +14,32 @@ the CP3 selected configuration at TechnicalScore `0.932620`.
 | 1.5 | As 1.4 with popularity features zeroed inside dominance tiers | Public 200 | 0.9950 | 0.832290 | 1.930 | 0.928587 | Revert: popularity carries real within-tier signal (targets are popularity-biased) |
 | 1.6 | **Task 1 final: tiered dominance + uncapped tier paging on rotation turns; fresh-disclosure turns keep the CP3 pool until the reranker is retrained within tiers (Task 3)** | Public 200 | 0.9950 | 0.845734 | 1.930 | **0.932620** | **Keep: no regression; rotation now pages the whole ≤1000 top tier unseen-first and never reintroduces shown products while unseen tier members remain** |
 
+| 2.1 | Frozen CP4 synthetic splits generated (no runtime change) | Public 200 | 0.9950 | 0.845734 | 1.930 | 0.932620 | Keep: data-only task, agent untouched |
+| 2.2 | Current agent on synthetic_dev (1000) | Synthetic dev | 1.0000 | 0.696668 | 2.040 | 0.888200 | Recorded: Task 3 selection baseline |
+| 2.3 | Current agent on hard-case set (500) | Hard cases | 0.8680 | 0.462138 | 4.060 | 0.711441 | Recorded: confirms the funnel struggles on common-attribute / dense-neighborhood targets |
+
+## Task 2 notes
+
+- `scripts/create_cp4_synthetic_sets.py` (seed 20260831) generates all 5000
+  sessions in one deterministic run from the 34,447 eligible catalog products
+  (features/details present, rating_number >= 5, disjoint from all public
+  targets), shuffles, and slices `synthetic_train.jsonl` (3000),
+  `synthetic_dev.jsonl` (1000), and `synthetic_holdout.jsonl` (1000,
+  aggregate-only reporting). `data/releases/` is gitignored, so the freeze is
+  the committed script + seed + these SHA256 digests:
+  train `768dc75ce302e1b901002298053cd046f19d6d14e37720765ad483fa3e8d33bb`,
+  dev `211f6ea169d9017c6a506080ee0568fd278f1b3ac889df3cd168b4d0a5108c01`,
+  holdout `d6ae30889da20bd764ac1dcffa197cd632f2a028a201a4597a3a551542c32614`.
+- `scripts/create_cp4_hardcase_set.py` selects 500 of 4303 eligible hard
+  targets (hard constraint in {cotton, imported}, >100 neighbors satisfying
+  every hard constraint jointly, plus >= 2 of: feature/detail string >= 100
+  chars, missing description, rating_number <= 50); SHA256
+  `5f0fef9772f83206508b314e8894cb8b9863106de0f92257848ef55965f01bcb`.
+- Hard-case scenario aggregates (row 2.3): boundary 0.800/0.427/5.48,
+  browsing 0.870/0.440/4.16, buying 0.870/0.447/3.45, intent_override
+  0.880/0.573/4.96 (HitRate/MRR/MTTC). The synthetic holdout is not evaluated
+  until the Task 3 configuration is frozen.
+
 ## Task 1 notes
 
 - `_exact_evidence_pool()` now returns the complete top dominance tier (every
