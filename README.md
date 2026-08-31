@@ -48,6 +48,67 @@ The command writes per-session results and aggregate metrics to `results.json`.
 The included weak BM25 starter scores Hit Rate@10 `0.125`, MRR `0.068034`, and
 MTTC `9.81` on the released public set. See `docs/baseline_results.json`.
 
+## CP3 Agent
+
+The `sri-experiment-cp3` implementation is an offline evidence-funnel agent:
+stateful BM25/RRF retrieval, exact catalog-value matching, a 16-feature linear
+reranker, and coverage-aware multi-turn rotation. Its recorded public result is
+Hit Rate@10 `0.995`, MRR `0.845734`, MTTC `1.93`, and TechnicalScore `0.932620`.
+See `CP3_EXPERIMENTS.md` for leakage controls, value sweeps, rejected variants,
+target-disjoint validation, resource tradeoffs, and reproduction commands.
+
+## CP4 Agent
+
+The `sri-experiment-cp4` branch adds a genuinely fine-tuned 2-layer TinyBERT
+cross-encoder. A deterministic intent classifier applies it only to the top 20
+specific-buying candidates; browsing, boundary, and override traffic retains
+the stronger CP3 lexical ranking. The 4.49 MB quantized ONNX model runs locally
+on CPU and falls back automatically to CP3 if ONNX Runtime is unavailable.
+
+```bash
+python -m pip install -r requirements-cp4.txt
+python -m evaluator.local_evaluator
+```
+
+No network, API key, vector service, PyTorch, or GPU is required at inference
+time. See `CP4_EXPERIMENTS.md` for the complete workflow and ablations.
+
+## CP5 Agent
+
+The `sri-experiment-cp5` branch replaces neural rank fusion with a
+protocol-aware, catalog-derived dialogue-card index and confidence-qualified
+output. It matches ordered evidence prefixes globally across all 50,000 items,
+returns one candidate while a prefix remains ambiguous, rotates alternatives
+across turns, and restores a full window on the final turn. Free-form messages
+automatically retain the CP4 lexical fallback.
+
+The selected full-public result is Hit Rate@10 `1.0`, MRR `1.0`, MTTC `2.14`,
+and TechnicalScore `0.977200`. It uses only the Python standard library at
+runtime; the CP4 model is deliberately disabled after a no-effect ablation.
+
+```bash
+python -m scripts.evaluate_cp5_variant full --output data/releases/cp5/final/full.json
+```
+
+See `CP5_EXPERIMENTS.md` for the complete workflow, target-disjoint validation,
+all accepted and rejected strategies, runtime-parity audit, and limitations.
+
+## CP6 Agent
+
+The `sri-experiment-cp6` branch audits 15 public solutions and promotes the one
+remaining mechanism that improves CP5 consistently: exact coarse-category
+scoping inside every FTS5 retrieval route. It preserves full-public Hit Rate@10
+and MRR at `1.0`, reduces MTTC from `2.14` to `2.10`, and raises
+TechnicalScore from `0.977200` to `0.978000`. The gain repeats on the public
+development split, frozen holdout, and three target-disjoint validation sets.
+
+```bash
+python -m scripts.evaluate_cp6_variant full --output data/releases/cp6/final/full.json
+```
+
+See `CP6_EXPERIMENTS.md` for the pinned repository audit, isolated strategy
+grid, rejected neural/release/profile alternatives, and reproduction commands.
+
 ## Agent Interface
 
 ```python

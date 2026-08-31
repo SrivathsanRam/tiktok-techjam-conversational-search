@@ -1,0 +1,19 @@
+{
+  "catalog_sha256": "da979b05a68af864cb0dcf9ee6a81c010c7e66a57978ad286c7a2e005fc69a67",
+  "synthetic_source": "data/releases/cp3/synthetic-1000.jsonl",
+  "synthetic_source_sha256": "786d9519bb7480446323cc385a130366f3e63ba67a68d1b738e87b1e91618160",
+  "synthetic_seed": 20260831,
+  "pair_mining_seed": 20260901,
+  "synthetic_sessions": 1000,
+  "train_sessions": 787,
+  "validation_sessions": 213,
+  "train_groups": 1740,
+  "validation_groups": 465,
+  "train_pairs": 12180,
+  "hard_negatives_per_group": 5,
+  "tail_negatives_per_group": 2,
+  "candidate_coverage": 0.795742,
+  "public_target_overlap": 0,
+  "split_unit": "complete sample_id / target product",
+  "split_function": "first 64 bits of SHA-256(sample_id), validation if < 0.20"
+}
