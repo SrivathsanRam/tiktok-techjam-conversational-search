@@ -141,6 +141,75 @@ class AgentStateTest(unittest.TestCase):
         )
 
 
+class RetrievalRouteTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        catalog_path = Path(self.temporary_directory.name) / "catalog.jsonl"
+        products = [
+            {
+                "parent_asin": "LEATHER",
+                "title": "Leather belt",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Imported", "Full grain leather"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Everyday belt"],
+            },
+            {
+                "parent_asin": "COTTON",
+                "title": "Cotton belt",
+                "categories": ["Accessories", "Belts"],
+                "features": ["Imported", "Woven cotton"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Casual belt"],
+            },
+            {
+                "parent_asin": "HAT",
+                "title": "Imported wool hat",
+                "categories": ["Accessories", "Hats"],
+                "features": ["Imported"],
+                "details": {"department": "mens"},
+                "store": "Example",
+                "description": ["Winter hat"],
+            },
+        ]
+        catalog_path.write_text(
+            "".join(json.dumps(product) + "\n" for product in products),
+            encoding="utf-8",
+        )
+        # "imported" appears in every product, so any threshold below the
+        # catalog size marks it generic.
+        self.agent = Agent(catalog_path, generic_token_df=2)
+        self.agent.reset("session", {})
+
+    def tearDown(self) -> None:
+        self.agent.connection.close()
+        self.temporary_directory.cleanup()
+
+    def test_document_frequency_index_counts_products_not_occurrences(self) -> None:
+        self.assertEqual(self.agent._token_df["imported"], 3)
+        self.assertEqual(self.agent._token_df["leather"], 1)
+
+    def test_generic_only_constraint_does_not_add_a_route(self) -> None:
+        without = self.agent._fused_search(
+            ["belts"], 10, constraints=(), category_phrase="accessories belts"
+        )
+        with_generic = self.agent._fused_search(
+            ["belts"], 10, constraints=("Imported",), category_phrase="accessories belts"
+        )
+        self.assertEqual(without, with_generic)
+
+    def test_category_material_route_prefers_matching_material(self) -> None:
+        ranked = self.agent._fused_search(
+            ["belts", "leather"],
+            10,
+            constraints=("leather",),
+            category_phrase="accessories belts",
+        )
+        self.assertEqual(ranked[0], "LEATHER")
+
+
 class DominanceTierRotationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()

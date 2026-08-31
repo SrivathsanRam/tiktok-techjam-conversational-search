@@ -101,6 +101,7 @@ class Agent:
         use_coverage_rotation: bool = True,
         coverage_head: int = 0,
         use_fresh_tier_dominance: bool = True,
+        generic_token_df: int = 12000,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
@@ -115,6 +116,8 @@ class Agent:
         self._use_coverage_rotation = use_coverage_rotation
         self._coverage_head = coverage_head
         self._use_fresh_tier_dominance = use_fresh_tier_dominance
+        self._generic_token_df = generic_token_df
+        self._token_df: Counter[str] = Counter()
         self._exact_cache: dict[str, tuple[str, ...]] = {}
         self._exact_membership_cache: dict[str, frozenset[str]] = {}
         self._product_profile_cache: dict[
@@ -201,6 +204,11 @@ class Agent:
                         description,
                     )
                 )
+                searchable = " ".join(
+                    (title, categories, features, details, store, description)
+                ).lower()
+                searchable_terms = set(_terms(searchable))
+                self._token_df.update(searchable_terms)
                 if self._use_exact_evidence:
                     raw_values: list[str] = []
                     for field in (product.get("features"), product.get("details")):
@@ -216,10 +224,6 @@ class Agent:
                             )
                         elif field not in (None, ""):
                             raw_values.append(str(field))
-                    searchable = " ".join(
-                        (title, categories, features, details, store, description)
-                    ).lower()
-                    searchable_terms = set(_terms(searchable))
                     raw_values.extend(MATERIAL_TERMS & searchable_terms)
                     raw_values.extend(
                         f"color: {color}" for color in COLOR_TERMS & searchable_terms
@@ -312,24 +316,58 @@ class Agent:
         top_k: int,
         disjunctive_weight: float = 1.0,
         popularity_weight: float = 0.0,
+        constraints: tuple[str, ...] = (),
+        category_phrase: str = "",
     ) -> list[str]:
         if not terms:
             return []
         quoted = [f'"{term}"' for term in terms]
-        # All disclosed constraints originate in catalog text.  The conjunctive
-        # route therefore supplies precision, while phrase and disjunctive routes
-        # retain recall when free-form wording is less exact.
-        expressions = [
-            (" AND ".join(quoted), 2.5),
-            (
-                " OR ".join(
-                    f'"{terms[index]} {terms[index + 1]}"'
-                    for index in range(len(terms) - 1)
-                ),
-                1.25,
+        # Per-constraint routes: each disclosed requirement retrieves on its
+        # own, so one over-constrained bag can no longer empty the precision
+        # lanes.  Generic tokens are recognized by catalog document frequency
+        # rather than a hardcoded list.
+        generic_df = self._generic_token_df
+        category_terms = _terms(category_phrase)
+        materials = [term for term in terms if term in MATERIAL_TERMS]
+        colors = [term for term in terms if term in COLOR_TERMS]
+        expressions: list[tuple[str, float]] = []
+        if category_terms:
+            category_quoted = [f'"{term}"' for term in category_terms]
+            expressions.append((" AND ".join(category_quoted), 2.0))
+            if materials:
+                expressions.append((
+                    " AND ".join(category_quoted + [f'"{term}"' for term in materials]),
+                    2.5,
+                ))
+            if colors:
+                expressions.append((
+                    " AND ".join(category_quoted + [f'"{term}"' for term in colors]),
+                    2.0,
+                ))
+        constraint_phrases: list[str] = []
+        for constraint in constraints:
+            tokens = [token.lower() for token in TOKEN_RE.findall(constraint)]
+            # A constraint made only of generic tokens (imported, bare
+            # percentages) matches most of the catalog and adds noise.
+            if not tokens or not any(
+                self._token_df.get(token, 0) <= generic_df for token in tokens
+            ):
+                continue
+            constraint_phrases.append('"' + " ".join(tokens) + '"')
+        if constraint_phrases:
+            expressions.append((" OR ".join(dict.fromkeys(constraint_phrases)), 2.5))
+        if not expressions:
+            # No category or usable constraint yet: the concatenated
+            # conjunctive bag remains the precision fallback.
+            expressions.append((" AND ".join(quoted), 2.5))
+        expressions.append((
+            " OR ".join(
+                f'"{terms[index]} {terms[index + 1]}"'
+                for index in range(len(terms) - 1)
             ),
-            (" OR ".join(quoted), disjunctive_weight),
-        ]
+            1.25,
+        ))
+        expressions.append((" OR ".join(quoted), disjunctive_weight))
         scores: dict[str, float] = {}
         best_route_rank: dict[str, int] = {}
         for expression, weight in expressions:
@@ -762,13 +800,18 @@ class Agent:
 
         query_text = " ".join(str(item) for item in state["messages"])
         unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
+        constraints = self._constraint_phrases(state["messages"])
+        requested_category = self._requested_category(
+            str(state.get("base_message") or "")
+        )[0]
         candidates = self._fused_search(
             unique_terms,
             RERANK_CANDIDATES,
             disjunctive_weight=1.0 if state["exploratory"] else 2.0,
             popularity_weight=0.0 if state["exploratory"] else 1.0,
+            constraints=tuple(constraints),
+            category_phrase=requested_category,
         )
-        constraints = self._constraint_phrases(state["messages"])
         exact_candidates, tier_counts = self._exact_evidence_pool(constraints)
         signature = tuple(unique_terms)
         shown = state["shown"]

@@ -25,6 +25,37 @@ the CP3 selected configuration at TechnicalScore `0.932620`.
 | 3.5 | Selected config re-run | Synthetic dev 1000 | 1.0000 | 0.749971 | 1.981 | 0.905371 | Recorded: +0.017171 over row 2.2 |
 | 3.6 | Selected config re-run | Hard cases 500 | 0.9060 | 0.518359 | 3.546 | 0.757588 | Recorded: +0.046147 over row 2.3 |
 
+| 4.1 | **Per-constraint retrieval routes with df-based generic downweighting (df threshold 12000)** | Public 200 | **1.0000** | **0.856365** | **1.885** | **0.939210** | **Keep: +0.000631 over row 3.1** |
+| 4.2 | Same, generic df threshold 6000 / 9000 / 15000 / 20000 | Public 200 | 1.0000 | 0.856276 / 0.856276 / 0.856365 / 0.856365 | 1.885 | 0.939183 / 0.939183 / 0.939210 / 0.939210 | Keep 12000: flat plateau, chosen mid-range so `imported` (df 15300) and bare `100` (df 17397) stay generic while `polyester` (10884) and `sole` (10441) stay specific |
+| 4.3 | Selected routes | Synthetic dev 1000 | 1.0000 | 0.766978 | 2.016 | 0.909773 | Keep: +0.004402 over row 3.5 |
+| 4.4 | Selected routes | Hard cases 500 | 0.9060 | 0.543895 | 3.578 | 0.764609 | Keep: +0.007021 over row 3.6 |
+
+## Task 4 notes
+
+- `_fused_search()` replaces the single concatenated-bag conjunctive query
+  with per-constraint routes, all fused by the existing RRF (`weight /
+  (20 + rank)`, rank constant 20):
+
+  | Route | FTS expression | Weight |
+  |---|---|---:|
+  | Category-only | turn-1 category terms joined by `AND` | 2.0 |
+  | Category + material | category terms + requested materials, `AND` | 2.5 |
+  | Color + category | category terms + requested colors, `AND` | 2.0 |
+  | Exact constraint phrases | each non-generic constraint as a quoted phrase, joined by `OR` | 2.5 |
+  | Concatenated bag (fallback only) | every term `AND`-joined, used when no category or usable constraint exists | 2.5 |
+  | Adjacent phrase | unchanged | 1.25 |
+  | Disjunctive | unchanged | 1.0 exploratory / 2.0 otherwise |
+
+- Generic tokens are identified by catalog document frequency computed at
+  index time (`_token_df`, one count per product), never by a hardcoded list.
+  A constraint whose every token has `df > 12000` contributes no phrase route:
+  measured df values are `imported` 15300, `100` 17397, `closure` 19303,
+  `wash` 16134, versus `polyester` 10884, `cotton` 9775, `leather` 7503,
+  `zipper` 4166, `grey` 2017.
+- The category phrase comes from the turn-1 message via
+  `_requested_category()`, the same parse the Task 3 coarse-category features
+  use, so no new wording dependency is introduced.
+
 ## Task 3 notes
 
 - Protocol `cp4-within-tier-mrr-weighted-v1` (`scripts/train_cp4_reranker.py`,
