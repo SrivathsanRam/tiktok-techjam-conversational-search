@@ -46,6 +46,7 @@ class AgentStateTest(unittest.TestCase):
     def test_override_replaces_stale_opener_but_retains_later_disclosure(self) -> None:
         self.agent.respond("session", "I'm looking for accessories belts. Prefer fabric.", 1, 10)
         self.agent.respond("session", "For that, what matters is: buckle closure.", 2, 10)
+        self.agent._sessions["session"]["shown"].add("STALE")
         self.agent.respond(
             "session",
             "Actually, ignore my earlier preference. What I need is: leather.",
@@ -59,6 +60,7 @@ class AgentStateTest(unittest.TestCase):
             "Actually, ignore my earlier preference. What I need is: leather.",
             messages,
         )
+        self.assertNotIn("STALE", self.agent._sessions["session"]["shown"])
 
     def test_no_additional_preference_does_not_pollute_state(self) -> None:
         self.agent.respond("session", "I'm looking for accessories belts, but I'm still exploring.", 1, 10)
@@ -107,6 +109,30 @@ class AgentStateTest(unittest.TestCase):
             first["recommendations"][0]["parent_asin"],
             second["recommendations"][0]["parent_asin"],
         )
+
+    def test_non_protocol_query_keeps_multi_result_fallback(self) -> None:
+        self.agent.reset("free-form", {})
+        response = self.agent.respond(
+            "free-form", "Recommend a durable belt made of leather", 1, 10
+        )
+        self.assertEqual(len(response["recommendations"]), 2)
+
+    def test_final_turn_relaxes_ambiguity_abstention(self) -> None:
+        self.agent.reset("last-turn", {})
+        self.agent.respond(
+            "last-turn",
+            "I'm looking for accessories belts, but I'm still exploring.",
+            1,
+            10,
+        )
+        ninth = self.agent.respond(
+            "last-turn", "I don't have a preference for color.", 9, 10
+        )
+        tenth = self.agent.respond(
+            "last-turn", "I don't have a preference for size.", 10, 10
+        )
+        self.assertEqual(len(ninth["recommendations"]), 1)
+        self.assertEqual(len(tenth["recommendations"]), 2)
 
     def test_query_profile_classifies_intent_and_accumulates_constraints(self) -> None:
         self.agent.respond(

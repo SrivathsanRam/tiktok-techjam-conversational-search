@@ -32,6 +32,19 @@ def main() -> None:
     parser.add_argument("--cross-override-weight", type=float, default=0.0)
     parser.add_argument("--cross-min-constraints", type=int, default=1)
     parser.add_argument("--cross-min-margin", type=float, default=0.0)
+    parser.add_argument("--dialogue-cards", action="store_true")
+    parser.add_argument(
+        "--dialogue-tiebreak",
+        choices=("popularity", "linear", "hybrid", "mode", "blend"),
+        default="popularity",
+    )
+    parser.add_argument("--opening-output-k", type=int, default=10)
+    parser.add_argument("--dialogue-browsing-linear-weight", type=float, default=0.0)
+    parser.add_argument("--dialogue-buying-linear-weight", type=float, default=0.0)
+    parser.add_argument("--dialogue-override-linear-weight", type=float, default=0.0)
+    parser.add_argument("--dialogue-boundary-linear-weight", type=float, default=0.0)
+    parser.add_argument("--ambiguous-output-k", type=int, default=10)
+    parser.add_argument("--authoritative-intent-mode", action="store_true")
     args = parser.parse_args()
 
     samples = load_jsonl(args.dataset)
@@ -62,6 +75,15 @@ def main() -> None:
         cross_encoder_override_weight=args.cross_override_weight,
         cross_encoder_min_constraints=args.cross_min_constraints,
         cross_encoder_min_margin=args.cross_min_margin,
+        use_dialogue_cards=args.dialogue_cards,
+        dialogue_tiebreak=args.dialogue_tiebreak,
+        opening_output_k=args.opening_output_k,
+        dialogue_browsing_linear_weight=args.dialogue_browsing_linear_weight,
+        dialogue_buying_linear_weight=args.dialogue_buying_linear_weight,
+        dialogue_override_linear_weight=args.dialogue_override_linear_weight,
+        dialogue_boundary_linear_weight=args.dialogue_boundary_linear_weight,
+        ambiguous_output_k=args.ambiguous_output_k,
+        use_authoritative_intent_mode=args.authoritative_intent_mode,
     )
     agent_init_seconds = time.perf_counter() - agent_started
     evaluation_started = time.perf_counter()
@@ -89,6 +111,15 @@ def main() -> None:
         "cross_encoder_override_weight": args.cross_override_weight,
         "cross_encoder_min_constraints": args.cross_min_constraints,
         "cross_encoder_min_margin": args.cross_min_margin,
+        "use_dialogue_cards": args.dialogue_cards,
+        "dialogue_tiebreak": args.dialogue_tiebreak,
+        "opening_output_k": args.opening_output_k,
+        "dialogue_browsing_linear_weight": args.dialogue_browsing_linear_weight,
+        "dialogue_buying_linear_weight": args.dialogue_buying_linear_weight,
+        "dialogue_override_linear_weight": args.dialogue_override_linear_weight,
+        "dialogue_boundary_linear_weight": args.dialogue_boundary_linear_weight,
+        "ambiguous_output_k": args.ambiguous_output_k,
+        "use_authoritative_intent_mode": args.authoritative_intent_mode,
         "catalog_load_seconds": round(catalog_load_seconds, 6),
         "agent_init_seconds": round(agent_init_seconds, 6),
         "evaluation_seconds": round(evaluation_seconds, 6),

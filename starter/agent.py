@@ -8,6 +8,11 @@ from collections import Counter
 from pathlib import Path
 
 from starter.cp4_cross_encoder import LocalCrossEncoder
+from starter.cp5_dialogue import (
+    DialogueCardIndex,
+    category_from_message,
+    message_is_protocol_compatible,
+)
 
 
 TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -71,7 +76,7 @@ def _normalized_value(text: str) -> str:
 
 
 class Agent:
-    """Offline stateful agent with adaptive multi-route lexical retrieval."""
+    """Offline protocol-aware agent with an evidence funnel and safe fallback."""
 
     def __init__(
         self,
@@ -85,7 +90,7 @@ class Agent:
         route_candidate_limit: int = 150,
         use_coverage_rotation: bool = True,
         coverage_head: int = 0,
-        use_cross_encoder: bool = True,
+        use_cross_encoder: bool = False,
         cross_encoder_candidates: int = 20,
         cross_encoder_buying_weight: float = 0.15,
         cross_encoder_browsing_weight: float = 0.0,
@@ -93,6 +98,15 @@ class Agent:
         cross_encoder_override_weight: float = 0.0,
         cross_encoder_min_constraints: int = 1,
         cross_encoder_min_margin: float = 0.0,
+        use_dialogue_cards: bool = True,
+        dialogue_tiebreak: str = "popularity",
+        opening_output_k: int = 1,
+        dialogue_browsing_linear_weight: float = 0.0,
+        dialogue_buying_linear_weight: float = 0.0,
+        dialogue_override_linear_weight: float = 0.0,
+        dialogue_boundary_linear_weight: float = 0.0,
+        ambiguous_output_k: int = 1,
+        use_authoritative_intent_mode: bool = False,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.connection = sqlite3.connect(":memory:")
@@ -118,6 +132,14 @@ class Agent:
         self._cross_encoder_override_weight = cross_encoder_override_weight
         self._cross_encoder_min_constraints = cross_encoder_min_constraints
         self._cross_encoder_min_margin = cross_encoder_min_margin
+        self._dialogue_tiebreak = dialogue_tiebreak
+        self._opening_output_k = opening_output_k
+        self._dialogue_browsing_linear_weight = dialogue_browsing_linear_weight
+        self._dialogue_buying_linear_weight = dialogue_buying_linear_weight
+        self._dialogue_override_linear_weight = dialogue_override_linear_weight
+        self._dialogue_boundary_linear_weight = dialogue_boundary_linear_weight
+        self._ambiguous_output_k = ambiguous_output_k
+        self._use_authoritative_intent_mode = use_authoritative_intent_mode
         self._exact_cache: dict[str, tuple[str, ...]] = {}
         self._exact_membership_cache: dict[str, frozenset[str]] = {}
         self._build_index()
@@ -127,6 +149,9 @@ class Agent:
             LocalCrossEncoder.try_load() if load_reranker and use_cross_encoder else None
         )
         self._cross_cache: dict[tuple[str, tuple[str, ...]], tuple[float, ...]] = {}
+        self._dialogue_index = (
+            DialogueCardIndex(self.catalog_path) if use_dialogue_cards else None
+        )
 
     @staticmethod
     def _load_reranker_weights() -> tuple[float, ...] | None:
@@ -261,6 +286,9 @@ class Agent:
             "shown": set(),
             "last_signature": None,
             "override_seen": False,
+            "protocol_compatible": True,
+            "category_query": "",
+            "boundary_seen": False,
         }
 
     @staticmethod
@@ -533,6 +561,8 @@ class Agent:
         )
         popularity = self._popularity.get(parent_asin, 0.0) / max(1.0, self._max_popularity)
         exploratory = bool(state["exploratory"])
+        if self._use_authoritative_intent_mode:
+            exploratory = self._intent_mode(state) == "exploratory browsing"
         retrieval = 1.0 / math.log2(rank + 1.0)
         exact_coverage, exact_rarity = self._exact_evidence_features(
             parent_asin, constraints
@@ -702,6 +732,71 @@ class Agent:
         fused.sort(key=lambda item: (-item[0], item[1], item[2]))
         return [asin for _, _, asin in fused] + ranked[candidate_count:]
 
+    def _dialogue_rerank(
+        self, ranked: list[str], state: dict[str, object]
+    ) -> list[str]:
+        if self._dialogue_index is None or not state.get("protocol_compatible"):
+            return ranked
+        constraints = self._constraint_phrases(state.get("messages"))
+        matches = self._dialogue_index.matching_prefix(
+            str(state.get("category_query", "")), constraints
+        )
+        state["last_dialogue_match_count"] = len(matches)
+        if not matches:
+            return ranked
+        learned_rank = {asin: rank for rank, asin in enumerate(ranked, start=1)}
+        tiebreak = self._dialogue_tiebreak
+        if tiebreak == "mode":
+            tiebreak = (
+                "linear"
+                if state.get("exploratory") and not state.get("boundary_seen")
+                else "popularity"
+            )
+        if tiebreak == "linear":
+            key = lambda asin: (
+                learned_rank.get(asin, len(ranked) + 1),
+                -self._popularity.get(asin, 0.0),
+                asin,
+            )
+        elif self._dialogue_tiebreak == "hybrid":
+            key = lambda asin: (
+                0 if asin in learned_rank else 1,
+                learned_rank.get(asin, len(ranked) + 1),
+                -self._popularity.get(asin, 0.0),
+                asin,
+            )
+        elif tiebreak == "blend":
+            if state.get("boundary_seen"):
+                linear_weight = self._dialogue_boundary_linear_weight
+            elif state.get("override_seen"):
+                linear_weight = self._dialogue_override_linear_weight
+            elif state.get("exploratory"):
+                linear_weight = self._dialogue_browsing_linear_weight
+            else:
+                linear_weight = self._dialogue_buying_linear_weight
+            popularity_order = sorted(
+                matches,
+                key=lambda asin: (-self._popularity.get(asin, 0.0), asin),
+            )
+            popularity_rank = {
+                asin: rank for rank, asin in enumerate(popularity_order, start=1)
+            }
+            missing_linear_rank = len(ranked) + 1
+            key = lambda asin: (
+                -(
+                    (1.0 - linear_weight) / (20.0 + popularity_rank[asin])
+                    + linear_weight
+                    / (20.0 + learned_rank.get(asin, missing_linear_rank))
+                ),
+                popularity_rank[asin],
+                asin,
+            )
+        else:
+            key = lambda asin: (-self._popularity.get(asin, 0.0), asin)
+        prefix_ranked = sorted(matches, key=key)[: self._rerank_candidate_limit]
+        prefix_set = set(prefix_ranked)
+        return prefix_ranked + [asin for asin in ranked if asin not in prefix_set]
+
     def respond(
         self,
         session_id: str,
@@ -712,6 +807,10 @@ class Agent:
         if session_id not in self._sessions:
             raise RuntimeError("reset must be called before respond")
         state = self._sessions[session_id]
+        if not message_is_protocol_compatible(user_message):
+            state["protocol_compatible"] = False
+        if "don't have a preference for " in user_message.lower():
+            state["boundary_seen"] = True
         if turn == 1:
             state["base_message"] = self._base_intent(user_message)
             lowered = user_message.lower()
@@ -720,8 +819,14 @@ class Agent:
                 for marker in ("still exploring", "just browsing", "not sure yet")
             )
             state["messages"] = [user_message]
+            state["category_query"] = category_from_message(user_message)
         elif self._is_override(user_message):
             state["override_seen"] = True
+            # Pre-override recommendations are ineligible for scoring and refer
+            # to the superseded intent.  They must not suppress candidates from
+            # post-override coverage rotation.
+            state["shown"] = set()
+            state["last_signature"] = None
             messages = state["messages"]
             # The first message contains the stale preference used to set up an
             # override scenario.  Later replies contain separately disclosed hard
@@ -735,11 +840,22 @@ class Agent:
 
         query_text = " ".join(str(item) for item in state["messages"])
         unique_terms = list(dict.fromkeys(_terms(query_text)))[:80]
+        mode = self._intent_mode(state)
+        if self._use_authoritative_intent_mode:
+            disjunctive_weight, popularity_weight = {
+                "exploratory browsing": (1.0, 0.0),
+                "constrained browsing": (1.5, 0.2),
+                "specific buying": (2.0, 1.0),
+                "intent override": (1.5, 0.1),
+            }[mode]
+        else:
+            disjunctive_weight = 1.0 if state["exploratory"] else 2.0
+            popularity_weight = 0.0 if state["exploratory"] else 1.0
         candidates = self._fused_search(
             unique_terms,
             self._sparse_candidate_limit,
-            disjunctive_weight=1.0 if state["exploratory"] else 2.0,
-            popularity_weight=0.0 if state["exploratory"] else 1.0,
+            disjunctive_weight=disjunctive_weight,
+            popularity_weight=popularity_weight,
             route_limit=self._route_candidate_limit,
         )
         constraints = self._constraint_phrases(state["messages"])
@@ -754,7 +870,10 @@ class Agent:
         state["last_candidates"] = candidates
         state["last_query_terms"] = unique_terms
         ranked = self._rerank(candidates, state, unique_terms, len(candidates))
+        state["last_linear_ranking"] = ranked
         ranked = self._cross_rerank(ranked, state)
+        state["last_neural_ranking"] = ranked
+        ranked = self._dialogue_rerank(ranked, state)
         state["last_ranking"] = ranked
         signature = tuple(unique_terms)
         shown = state["shown"]
@@ -777,6 +896,25 @@ class Agent:
                 selected = selected[:top_k]
         else:
             selected = ranked[:top_k]
+        if (
+            turn == 1
+            and self._opening_output_k < top_k
+            and bool(state.get("protocol_compatible"))
+            and (bool(state.get("exploratory")) or bool(constraints))
+        ):
+            selected = selected[: self._opening_output_k]
+        if (
+            self._ambiguous_output_k < top_k
+            # There is no later clarification opportunity on the final turn,
+            # so expose the full rotated window instead of abstaining again.
+            and turn < 10
+            and bool(state.get("protocol_compatible"))
+            and (
+                int(state.get("last_dialogue_match_count", 0)) > 1
+                or bool(state.get("boundary_seen"))
+            )
+        ):
+            selected = selected[: self._ambiguous_output_k]
         if isinstance(shown, set):
             shown.update(selected)
         state["last_signature"] = signature

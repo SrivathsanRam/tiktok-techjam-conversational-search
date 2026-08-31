@@ -71,6 +71,26 @@ python -m evaluator.local_evaluator
 No network, API key, vector service, PyTorch, or GPU is required at inference
 time. See `CP4_EXPERIMENTS.md` for the complete workflow and ablations.
 
+## CP5 Agent
+
+The `sri-experiment-cp5` branch replaces neural rank fusion with a
+protocol-aware, catalog-derived dialogue-card index and confidence-qualified
+output. It matches ordered evidence prefixes globally across all 50,000 items,
+returns one candidate while a prefix remains ambiguous, rotates alternatives
+across turns, and restores a full window on the final turn. Free-form messages
+automatically retain the CP4 lexical fallback.
+
+The selected full-public result is Hit Rate@10 `1.0`, MRR `1.0`, MTTC `2.14`,
+and TechnicalScore `0.977200`. It uses only the Python standard library at
+runtime; the CP4 model is deliberately disabled after a no-effect ablation.
+
+```bash
+python -m scripts.evaluate_cp5_variant full --output data/releases/cp5/final/full.json
+```
+
+See `CP5_EXPERIMENTS.md` for the complete workflow, target-disjoint validation,
+all accepted and rejected strategies, runtime-parity audit, and limitations.
+
 ## Agent Interface
 
 ```python
