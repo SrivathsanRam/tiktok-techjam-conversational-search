@@ -109,6 +109,56 @@ python -m scripts.evaluate_cp6_variant full --output data/releases/cp6/final/ful
 See `CP6_EXPERIMENTS.md` for the pinned repository audit, isolated strategy
 grid, rejected neural/release/profile alternatives, and reproduction commands.
 
+## Synthetic Test Cases
+
+Beyond the 200 labeled public sessions, the agent can be validated against
+larger, **target-disjoint** synthetic session sets. Every synthetic target is
+disjoint from all public targets (and, for the split sets, from every other
+split), so scores never leak the public labels. Sessions carry only public
+fields; the evaluator derives the hidden intent cards from the catalog at run
+time, exactly as with the official set.
+
+Generation is deterministic (fixed seeds). Regenerate the sets with:
+
+```bash
+# 5000 sessions split into synthetic_train (3000) / synthetic_dev (1000) /
+# synthetic_holdout (1000), all target-disjoint, official 40/40/15/5 mix.
+python3 -m scripts.create_cp4_synthetic_sets
+
+# 500 sessions whose targets are hard for the exact-evidence funnel
+# (common attributes, many neighbors, sparse/low-popularity products).
+python3 -m scripts.create_cp4_hardcase_set
+```
+
+Both scripts write to `data/releases/cp4/` and print a JSON summary with a
+SHA-256 per file and the scenario counts.
+
+Run the agent against any generated set through the real evaluator loop
+(aggregate metrics only — holdout sessions are never inspected individually):
+
+```bash
+# Confirmation run on the synthetic holdout partition.
+python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/synthetic_holdout.jsonl
+
+# Or the dev split / hard-case set.
+python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/synthetic_dev.jsonl
+python3 -m scripts.evaluate_cp4_confirm --dataset data/releases/cp4/hard_cases.jsonl
+
+# Restrict a full dataset to the public holdout ids from the CP2 manifest.
+python3 -m scripts.evaluate_cp4_confirm --dataset data/public_set.jsonl --public-holdout
+```
+
+An **UNOFFICIAL** paraphrase-robustness diagnostic reworks the simulator's
+wording (framing verbs, list delimiters, sentence boundaries) while keeping all
+catalog-derived values verbatim, then reports the clean-vs-paraphrased gap. Its
+scores are diagnostic only and are never comparable to the official evaluator:
+
+```bash
+python3 -m tests.paraphrase_harness                 # full public set
+python3 -m tests.paraphrase_harness --limit 25      # quick smoke run
+python3 -m tests.paraphrase_harness --output docs/cp4_paraphrase_report.json
+```
+
 ## Agent Interface
 
 ```python
