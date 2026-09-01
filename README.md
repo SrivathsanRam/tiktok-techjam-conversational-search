@@ -149,7 +149,7 @@ synthetic validation (full ledger in [`EXPERIMENTS.md`](EXPERIMENTS.md)):
 | CP3 | Exact-evidence funnel, 16-feature reranker, coverage rotation | 0.932620 |
 | CP4 | Intent-gated fine-tuned TinyBERT cross-encoder | 0.933320 |
 | CP5 | Ordered dialogue cards + Top-1 abstention under ambiguity | 0.977200 |
-| CP6 | Exact category-scoped retrieval (after a 15-repository audit) | **0.978000** |
+| CP6 | Exact category-scoped retrieval | **0.978000** |
 
 Every change that lowered the score was reverted and recorded, including
 dense retrieval, wider candidate pools, per-mode ranking heads, fixed-turn

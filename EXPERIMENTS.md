@@ -410,7 +410,7 @@ failing.
 
 ---
 
-## CP6: cross-repository audit and exact-category retrieval
+## CP6: exact-category retrieval
 
 CP6 keeps CP5's perfect full-public HR@10 and MRR, reduces MTTC `2.14 → 2.10`,
 and raises TechnicalScore `0.977200 → 0.978000`. The selected change is an
@@ -426,37 +426,6 @@ metadata column, so the SQL evaluates `products MATCH ?` and
 afterward). Loose exact-evidence injections are filtered to the same category.
 If the parser fails, the category is absent, or the category-scoped search is
 empty, retrieval fails open to the global CP5 route.
-
-### Repository audit
-
-All 15 public repositories were shallow-cloned on 2026-09-01 at pinned
-commits. Metrics are self-reported upstream; the audit looked for mechanisms,
-ablations, and transferability.
-
-| Repository | Audited commit | Useful evidence | CP6 decision |
-|---|---|---|---|
-| johngao122 | [`88daecf`](https://github.com/johngao122/techjam-conversational-search/tree/88daecf6a1ff20096e8f9036573adb10d7811b00) | Early Top-1, category buckets, confidence/release policy, exhaustion handling | Top-1 already CP5; separately test exhaustion and fixed releases |
-| Khanna-Aman | [`3b76e2a`](https://github.com/Khanna-Aman/techjam-2026-shopping-copilot/tree/3b76e2a38caed9eb4fe9191a35f3ccd51eaacc76) | Exact category lock, strongest Top-1 sweep, review-count popularity; dense/profile ablations | Select exact category; retain review count; do not revive dense/profile |
-| Antelyuu | [`b7d553a`](https://github.com/Antelyuu/techjam-conversational-search/tree/b7d553a02d870dce52b5d4edd5183965cf022122) | E1–E9 ablations, category-scoped FTS, strict ownership, evidence-aware shortlist, fail-open | Category-scoped FTS selected; ownership/shortlist already CP5 |
-| Kairon-2005 | [`dcfbd52`](https://github.com/Kairon-2005/techjam2026/tree/dcfbd52cc3a61154a638e926fc5f603895aaa85b) | Popularity and dynamic intent routing strongest; semantic/profile paths not demonstrated | Keep CP5 popularity and state classifier; no semantic expansion |
-| algorathem | [`27d1afc`](https://github.com/algorathem/techjam2026-shopping-copilot/tree/27d1afc155ca877c6575c1dbbc55d545c346989d) | Early Top-1, category-tail parsing, `other`, override provenance; question-policy ablations | Existing CP5 equivalents retained; no information-gain policy switch |
-| Creomeow | [`6f3b05b`](https://github.com/Creomeow/techjam-conversational-search/tree/6f3b05b52f984669d6994c734e9304a0a34b0bb2) | `other`-first gains, boundary/exhaustion distinction, rotation/backfill | Keep `other` and rotation; test true-exhaustion release separately |
-| 13shreyansh | [`e9d3db9`](https://github.com/13shreyansh/shopping-copilot-techjam-2026/tree/e9d3db9dea05e4c454d858ec3b97b9d7725b900a) | Parser/Unicode/row-order audits and clean validation boundaries | Add narrow parser normalization and regression tests |
-| Shaneeen | [`8d8822e`](https://github.com/Shaneeen/ShopCopilot/tree/8d8822e7d27dc510c78c9c1fbc5eb93bf0cf5fdc) | Broad hybrid retrieval and full-pool audits expose precision loss from deep candidates | Do not widen CP5 pools or add global dense fusion |
-| kxphan05 | [`37b9fd4`](https://github.com/kxphan05/Spider-Rank/tree/37b9fd408b5cb20f9ba127c675f7cb092bc57950) | Lexical+BGE, PRF, optional cross-encoder, shown-result exclusion | Shown-result rotation already CP5; neural/PRF path lacks score evidence here |
-| ImNuza | [`5fa7b39`](https://github.com/ImNuza/opoyo-tiktok/tree/5fa7b39b95b9411df079da46ebf47e02f70ebc4b) | BM25, category lexicon, clarification policy, optional MiniLM | Exact structural category is stronger; optional neural path not promoted |
-| sci-m-wang | [`6b1aca6`](https://github.com/sci-m-wang/techjam-conversational-search-agent/tree/6b1aca69483d2d624757fd6aa7cc2ae131741799) | Measured LLM-agent token and serial-runtime cost with lower retrieval metrics | Reject API/LLM path for this fixed deterministic protocol |
-| fatbolster | [`a021df3`](https://github.com/fatbolster/techjam-shopping-agent/tree/a021df30a56b2a346047dccfdd9e73883c664856) | Fitted ranking features, state, clarification and scripted ablations | CP3/CP5 already contain stronger measured versions; no new promotion |
-| tristan1127 | [`3b273c3`](https://github.com/tristan1127/techjam2026-shopping-copilot/tree/3b273c36daf69908170b3e2042fef7571bcda207) | Deterministic FTS5 plus rule-based reranking | CP5 is a measured superset; no isolated candidate added |
-| wayneenxz | [`20cdc7b`](https://github.com/wayneenxz/maihenduo/tree/20cdc7b7f0d12639478465c43a800c68357485f1) | Whole-token/category parsing, override state, light diversity; negative RRF/wider-pool/stemming results | Parser/state already covered; negative results reinforce current pool sizes |
-| dngvmnh | [`2398a87`](https://github.com/dngvmnh/techjam-shopping-copilot/tree/2398a87c9511e2ced2407499e82a97ca55da96ae) | Exact protocol replay, category partition, candidate elimination, abstention, free-form fallback | Confirms CP5 architecture and CP6 category partition; zero-output/IG not adopted |
-
-The leading repositories converge structurally: for this fixed protocol,
-timing of exposure and exact catalog consistency matter more than a larger
-semantic model. BM25+dense, global cross-encoder reranking, larger pools,
-static personalization, and LLM agents were not rerun — CP3–CP5 had already
-measured the same families negatively or the audited repositories supplied
-stronger negative ablations.
 
 ### Isolated experiments (dev 150)
 
