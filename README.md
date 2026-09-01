@@ -51,6 +51,35 @@ confidence-qualified output. All indexes are built once at startup from
 `data/catalog.jsonl` alone; runtime code never reads targets, labels, or
 evaluator internals.
 
+### Architecture at a glance
+
+```mermaid
+flowchart TD
+    subgraph startup["One-time startup"]
+        catalog["Frozen product catalog"]
+        catalog --> fts["Category vocabulary and<br/>SQLite FTS5 indexes"]
+        catalog --> evidence["Exact-evidence<br/>inverted index"]
+        catalog --> cards["Ordered dialogue-card<br/>prefix index"]
+    end
+
+    message["User message and session state"] --> intent["Intent classification and<br/>constraint tracking"]
+    intent --> bm25["Category-scoped multi-route<br/>BM25 retrieval"]
+    intent --> exact["Exact-evidence lookup"]
+    fts --> bm25
+    evidence --> exact
+    bm25 --> pool["Candidate union<br/>capped at 80"]
+    exact --> pool
+    pool --> linear["16-feature linear reranker"]
+    linear --> dialogue["Protocol-gated ordered-prefix<br/>matching and reranking"]
+    cards --> dialogue
+    intent --> dialogue
+    dialogue --> rotation["Previously shown-item<br/>coverage rotation"]
+    rotation --> ambiguity{"Prefix still ambiguous?"}
+    ambiguity -- "Yes, before turn 10" --> clarify["Return the best candidate<br/>and ask a clarification"]
+    clarify -. "Next customer reply" .-> message
+    ambiguity -- "No, or turn 10" --> recommendations["Return ranked recommendations<br/>up to Top 10"]
+```
+
 1. **Conversation state and intent classification.** A deterministic
    classifier tracks the base request, separately disclosed hard constraints,
    boundary replies, already shown product IDs, and intent overrides. An
@@ -147,8 +176,9 @@ used offline for training only.
 Python 3.10 or later is the only requirement — the runtime has no third-party
 dependencies, so there is nothing to `pip install` for the submitted agent.
 
-**1. Get the catalog.** Download `catalog.jsonl.gz` from the GitHub Release
-attached to this repository (verify against the published `SHA256SUMS`), then:
+**1. Get the catalog.** Download `catalog.jsonl.gz` from the organizer's
+[`participant-kit` release](https://github.com/TechJam2026/techjam-conversational-search/releases/tag/participant-kit)
+and verify it against the published `SHA256SUMS`, then:
 
 ```bash
 gzip -dk catalog.jsonl.gz
@@ -235,6 +265,17 @@ README_DEV.md                     synthetic test-case workflow
 docs/                             competition spec, FAQ, API contract, scoring config
 docs/baseline_results.json        weak-starter reference (HR 0.125, MRR 0.068, MTTC 9.81)
 ```
+
+## Team Contributions
+
+- **Arjo Das:** Developed reranking and multi-route BM25 strategies, and built
+  the synthetic-data generation and adversarial robustness-testing workflows.
+- **Mok Jun Wen:** Worked on model fine-tuning, semantic embedding experiments,
+  and cross-encoder prototyping and evaluation.
+- **Srivathsan Ram:** Conducted ablation studies and developed the
+  confidence-based rank-abstention strategy, catalog coverage rotation,
+  ordered-prefix inverted index and preprocessing pipeline, and lexical
+  retrieval strategies.
 
 ## Limitations and What We Would Improve
 
